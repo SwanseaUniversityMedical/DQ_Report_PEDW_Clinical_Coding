@@ -1,0 +1,3117 @@
+---
+title: "Clinical Coding Changes over time"
+author: "Victoria Best"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 2
+    theme: united
+  word_document:
+    toc: yes
+    toc_depth: '2'
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+<!-- Install packages if required then load -->
+
+```{r load r packages, include=FALSE}
+
+library(knitr)
+library(tidyverse)
+library(scales)
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+library(zoo)
+library(RODBC)
+library(tcltk)
+library(xlsx)
+library(DiagrammeR)
+library(kableExtra)
+library(stringr)
+library(janitor)
+library(circlize)
+
+```
+
+```{r link to SAIL SQL, include=FALSE}
+
+# run this section from {}
+getLogin<-function(userName=''){  
+  require(tcltk);  
+  wnd<-tktoplevel();
+  tclVar(userName)->user;
+  tclVar("")->passVar;
+  #Label  
+  
+  #Username box  
+  tkgrid(tklabel(wnd,text="Username:"));  
+  tkgrid(tkentry(wnd,textvariable=user)->passBox);  
+  
+  #Password box  
+  tkgrid(tklabel(wnd,text="Password:"));  
+  tkgrid(tkentry(wnd,textvariable=passVar,show="*")->passBox);  
+  #Hitting return will also submit password  
+  tkbind(passBox,"<Return>",function() tkdestroy(wnd));  
+  #OK button  
+  tkgrid(tkbutton(wnd,text="OK",command=function() tkdestroy(wnd)));  
+  #Wait for user to click OK  
+  tkwait.window(wnd);  
+  password<-tclvalue(passVar);
+  userName<-tclvalue(user);
+  return(c(userName,password));  
+} 
+```
+
+```{r get login, echo=FALSE}
+
+login <- getLogin('bestv') # provide SAIL password in pop up box 
+channel <- odbcConnect('PR_SAIL',login[1],login[2]) # connect to DB2/SAIL 
+rm(login) # hides password
+
+```
+
+```{r user enter variables, include= FALSE}
+
+latest_adde_extract <- "20210728" # update with latest extract date for ADDE (date at the end of the view name SAIL0572V.ADDE_DEATHS_), format YYYYMMDD
+
+latest_opcs_meta_extract <- "20210803" # update with latest opcs meta data extract (date at the end of the view name SAILUKHDV.OPCS4_CODES_AND_TITLES_), format YYYYMMDD
+
+latest_icd_meta_extract <- "20210803" # update with latest icd meta data extract (date at the end of the view name SAILUKHDV.ICD10_CODES_AND_TITLES_AND_METADATA_), format YYYYMMDD
+
+ltst_extract <- "20210801" # update with the latest PEDW extract (date at the end of the view name SAIL0572V.PEDW_EPISODE_), format YYYYMMDD
+
+Dates3_End_Update <- "202107" # update with the last month of latest extract's date range, format YYYYMM (usually the month prior to the latest extract date)
+
+end_of_curr_mt <- as.Date("2021-07-31") # update with the last day of the month of latest extract's date range, format yyyy-mm-dd (usually the end of the month prior to the latest extract date)
+
+end_of_prev_mt <- as.Date("2021-06-30") # update with the last day of the month of previous extract's date range, format yyyy-mm-dd (a month prior to end_of_curr_mt)
+
+```
+
+```{r adjust date formats, include = FALSE}
+
+latest_extract_dt <- sqlQuery(channel, "SELECT max(eps.FIRST_REPORT_DT)
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps;")
+	
+latest_data_extract <- format(latest_extract_dt, "%d %B %Y")
+	
+previous_extract_dt <- sqlQuery(channel, "SELECT max(eps.FIRST_REPORT_DT)
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON_PREV AS eps;")
+	
+previous_data_extract <- format(previous_extract_dt, "%d %B %Y")
+
+end_of_prev_yearmon <- substr(end_of_prev_mt,1,7)
+
+Dates_Start <- as.Date("2019-04-01")
+
+Dates3_Start <- as.yearmon(as.character("201604"),"%Y%m") 
+
+latest_extract_M6 <- latest_extract_dt[1,1] - months(6) #obtain date six month before latest report max date
+
+previous_extract_M6 <- previous_extract_dt[1,1] - months(6) #obtain date six months before previous report max date
+
+curr_mt_char <- as.character(end_of_curr_mt, format("%B %Y"))
+
+Dates_Tab <- data.frame(seq(as.Date(Dates_Start),as.Date(end_of_curr_mt), by="days"))
+
+colnames(Dates_Tab) <- c("EPI_END_DT")
+
+Dates_Tab2 <- data.frame(seq(as.Date(latest_extract_M6),as.Date(end_of_curr_mt), by="days"))
+
+colnames(Dates_Tab2) <- c("EPI_END_DT")
+
+Dates3_End <- as.yearmon(as.character(Dates3_End_Update),"%Y%m")
+
+Dates_Tab3 <- data.frame(seq(Dates3_Start, Dates3_End, 1/12))
+
+colnames(Dates_Tab3) <- c("EPI_YR_MT")
+
+```
+
+```{r group0 identify max date for current reporting, include=FALSE}
+
+Max_New_Date <- sqlQuery(channel, "SELECT MAX(EPI_END_DT) FROM 
+	(SELECT eps.EPI_END_DT, COUNT(*)
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		GROUP BY eps.EPI_END_DT
+		HAVING COUNT(*) > 50) AS sub 
+		;") #Set having count as greater than 50 to ensure the removal of future dated data errors
+
+Max_New_Date <- as.Date(Max_New_Date[1,1])
+
+Max_Prev_Date <- sqlQuery(channel, "SELECT MAX(EPI_END_DT) FROM 
+	(SELECT eps.EPI_END_DT, COUNT(*)
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON_PREV AS eps
+		GROUP BY eps.EPI_END_DT
+		HAVING COUNT(*) > 50) AS sub 
+		;") #Set having count as greater than 50 to ensure the removal of future dated data errors
+
+Max_Prev_Date <- as.Date(Max_Prev_Date[1,1])
+
+Max_Prev_Date_M6 <- Max_Prev_Date %m-% months(6) #obtain date six month before previous report max date
+
+
+```
+
+```{r group0 import monthly average number of episodes, include = FALSE}
+
+pre_covid_avg <- sqlQuery(channel,"SELECT AVG(NUM_OF_EPS) FROM (SELECT eps.EPI_END_MT, COUNT(eps.EPI_ID) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT BETWEEN '2019-04-01' AND '2020-03-31'
+			GROUP BY eps.EPI_END_MT);")
+		
+post_covid_avg_sql <- paste("SELECT AVG(NUM_OF_EPS) FROM (SELECT eps.EPI_END_MT, COUNT(eps.EPI_ID) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT BETWEEN '2020-04-01' AND '",Max_New_Date,"'
+			GROUP BY eps.EPI_END_MT);",sep ="")
+
+post_covid_avg <- sqlQuery(channel,post_covid_avg_sql)
+
+post_covid_avg_excltst_sql <- paste("SELECT AVG(NUM_OF_EPS) FROM (SELECT eps.EPI_END_MT, COUNT(eps.EPI_ID) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT BETWEEN '2020-04-01' AND '",latest_extract_M6,"'
+			GROUP BY eps.EPI_END_MT);",sep ="")
+
+post_covid_avg_excltst <- sqlQuery(channel,post_covid_avg_excltst_sql)
+
+```
+
+```{r group0 import daily average number of episodes, include = FALSE}
+
+pre_covid_day_avg <- sqlQuery(channel,"SELECT AVG(NUM_OF_EPS) FROM (SELECT eps.EPI_END_DT, COUNT(eps.EPI_ID) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT BETWEEN '2019-04-01' AND '2020-03-31'
+			GROUP BY eps.EPI_END_DT);")
+		
+post_covid_day_avg_sql <- paste("SELECT AVG(NUM_OF_EPS) FROM (SELECT eps.EPI_END_DT, COUNT(eps.EPI_ID) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT BETWEEN '2020-04-01' AND '",Max_New_Date,"'
+			GROUP BY eps.EPI_END_DT);",sep ="")
+
+post_covid_day_avg <- sqlQuery(channel,post_covid_day_avg_sql)
+
+post_covid_day_avg_excltst_sql <- paste("SELECT AVG(NUM_OF_EPS) FROM (SELECT eps.EPI_END_DT, COUNT(eps.EPI_ID) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT BETWEEN '2020-04-01' AND '",latest_extract_M6,"'
+			GROUP BY eps.EPI_END_DT);",sep ="")
+
+post_covid_day_avg_excltst <- sqlQuery(channel,post_covid_day_avg_excltst_sql)
+
+```
+
+```{r group0 pre and post covid proportion of eps with no ICD-10 code, include = FALSE}
+
+avg_noICD_pre_covid <- sqlQuery(channel,"SELECT AVG(MQO.NUM_OF_EPS)
+	FROM
+	(SELECT	eps.EPI_END_MT,
+		COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT BETWEEN '2019-04-01' AND '2020-03-31'
+		AND eps.DIAG_CD_123 IS NULL
+		GROUP BY eps.EPI_END_MT) AS MQO;")
+	
+avg_noICD_post_covid_sql <- paste("SELECT AVG(MQO.NUM_OF_EPS)
+	FROM
+	(SELECT	eps.EPI_END_MT,
+		COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT BETWEEN '2020-04-01' AND '",Max_New_Date,"'
+		AND eps.DIAG_CD_123 IS NULL
+		GROUP BY eps.EPI_END_MT) AS MQO;",sep ="")
+
+avg_noICD_post_covid <- sqlQuery(channel,avg_noICD_post_covid_sql)
+
+avg_noICD_post_covid_excltst_sql <- paste("SELECT AVG(MQO.NUM_OF_EPS)
+	FROM
+	(SELECT	eps.EPI_END_MT,
+		COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT BETWEEN '2020-04-01' AND '",latest_extract_M6,"'
+		AND eps.DIAG_CD_123 IS NULL
+		GROUP BY eps.EPI_END_MT) AS MQO;",sep ="")
+
+avg_noICD_post_covid_excltst <- sqlQuery(channel,avg_noICD_post_covid_excltst_sql)
+	
+pre_covid_noICD_avg <- percent(as.numeric(avg_noICD_pre_covid/pre_covid_avg))
+
+post_covid_noICD_avg <- percent(as.numeric(avg_noICD_post_covid/post_covid_avg))
+
+post_covid_noICD_avg_excltst <- percent(as.numeric(avg_noICD_post_covid_excltst/post_covid_avg_excltst))
+
+```
+
+```{r group0 unfinished episodes, include= FALSE}
+
+UNFIN_EPS_SQL <- paste("SELECT substring(char(ep.EPI_STR_DT),1,7) AS EPI_STR_YR_MT, COUNT(ep.SPELL_NUM_PE) AS NUM_OF_EPS
+FROM SAIL0572V.PEDW_EPISODE_",ltst_extract," AS ep
+	WHERE ep.FINISHED_EPI_FLG = '0'
+	GROUP BY substring(char(ep.EPI_STR_DT),1,7);",sep ="")
+
+UNFIN_EPS <- sqlQuery(channel,UNFIN_EPS_SQL)
+
+First_Unfin_Ep <- min(UNFIN_EPS$EPI_STR_YR_MT)
+
+First_Unfin_Ep <- substr(First_Unfin_Ep,1,4)
+
+#reduced dataset for graph to avoid future dated errors
+
+UNFIN_EPS_RED_SQL <- paste("SELECT substring(char(ep.EPI_STR_DT),1,7) AS EPI_STR_YR_MT, COUNT(ep.SPELL_NUM_PE) AS NUM_OF_EPS
+FROM SAIL0572V.PEDW_EPISODE_",ltst_extract," AS ep
+	WHERE ep.FINISHED_EPI_FLG = '0'
+	AND ep.EPI_STR_DT BETWEEN '2020-03-31' AND '",Max_New_Date,"'
+	GROUP BY substring(char(ep.EPI_STR_DT),1,7);",sep ="")
+
+UNFIN_EPS_RED <- sqlQuery(channel, UNFIN_EPS_RED_SQL)
+
+UNFIN_EPS_RED$EPI_STR_YR_MT <- as.yearmon(UNFIN_EPS_RED$EPI_STR_YR_MT)
+
+#count of unfinished episodes
+
+Tot_Unfin_Eps_sql <- paste("SELECT COUNT (*) FROM (SELECT ep.SPELL_NUM_PE
+FROM SAIL0572V.PEDW_EPISODE_",ltst_extract," AS ep
+	WHERE ep.FINISHED_EPI_FLG = '0') AS sub;", sep = "")
+
+Tot_Unfin_Eps <- sqlQuery(channel, Tot_Unfin_Eps_sql)
+
+```
+
+```{r group1 consort calculations, episodes from Apr16, include = FALSE}
+
+total_eps_sql <- paste("SELECT COUNT(*) FROM
+	SAILW0572V.VB_PEDW_EPS_2015ON_PRE AS pre
+		WHERE pre.EPI_END_DT BETWEEN '2016-01-01' AND '",Max_New_Date,"';",sep ="")
+
+total_eps <- sqlQuery(channel,total_eps_sql)
+
+ALF_not_met_sql <- paste("SELECT COUNT(*) FROM 
+(SELECT * FROM SAILW0572V.VB_PEDW_EPS_2015ON_ALF AS ALF
+WHERE ALF.EPI_END_DT BETWEEN '2016-01-01' AND '",Max_New_Date,"') AS sub;", sep = "")
+
+ALF_not_met <- total_eps - sqlQuery(channel, ALF_not_met_sql)
+
+sens_icd_cd_sql <- paste("SELECT COUNT(*) FROM 
+(SELECT * FROM SAILW0572V.VB_PEDW_EPS_2015ON_ALF_SICD AS SICD
+WHERE SICD.EPI_END_DT BETWEEN '2016-01-01' AND '",Max_New_Date,"') AS sub;", sep = "")
+
+sens_icd_cd <- total_eps - ALF_not_met - sqlQuery(channel, sens_icd_cd_sql)
+
+sens_opcs_cd_sql <- paste("SELECT COUNT(*) FROM (SELECT * FROM SAILW0572V.VB_PEDW_EPS_2015ON_ALF_SICD_OPCS AS SOPCS
+WHERE SOPCS.EPI_END_DT BETWEEN '2016-01-01' AND '",Max_New_Date,"') AS sub;", sep = "")
+
+sens_opcs_cd <- total_eps - ALF_not_met - sens_icd_cd - sqlQuery(channel, sens_opcs_cd_sql)
+
+outside_hbs_sql <- paste("SELECT COUNT(*) FROM (SELECT * FROM SAILW0572V.VB_PEDW_EPS_2015ON_ALF_SICD_OPCS_HB AS HB
+WHERE HB.EPI_END_DT BETWEEN '2016-01-01' AND '",Max_New_Date,"') AS sub;", sep = "")
+
+outside_hbs <- total_eps - ALF_not_met - sens_icd_cd - sens_opcs_cd -  sqlQuery(channel,outside_hbs_sql)
+
+deceased_sql <- paste("SELECT COUNT(*) FROM (SELECT * FROM SAILW0572V.VB_PEDW_EPS_2015ON AS dcsd
+WHERE dcsd.EPI_END_DT BETWEEN '2016-01-01' AND '",Max_New_Date,"') AS sub;", sep = "")
+
+deceased <- total_eps - ALF_not_met - sens_icd_cd - sens_opcs_cd - outside_hbs - sqlQuery(channel, deceased_sql)
+
+Final_Cohort_sql <- paste("SELECT COUNT(*) FROM (SELECT * FROM SAILW0572V.VB_PEDW_EPS_2015ON AS dcsd
+WHERE dcsd.EPI_END_DT BETWEEN '2016-01-01' AND '",Max_New_Date,"') AS sub;", sep = "")
+
+Final_Cohort <- sqlQuery(channel, Final_Cohort_sql)
+
+```
+
+```{r group1 consort build, include = FALSE}
+
+consort_diag <- tibble(x=1:100, y=1:100) # create tibble to generate grid
+
+consort_diag %>% ggplot(aes(x,y)) +
+scale_x_continuous(minor_breaks = seq(10,100,10))+
+scale_y_continuous(minor_breaks = seq(10,100,10))+
+theme_linedraw() -> p #create backing grid
+
+p + geom_rect(xmin = 5, xmax=45, ymin=92, ymax=100, colour = 'black', fill = 'white', size = 0.25) + #create header box and label, box width can be adjusted with xmax values
+annotate('text', x=25, y=96, label = paste(format(total_eps[1,1], big.mark = ","), 'episodes in the period'), size = 3) + #set the text to the middle of the box and add carriage returns using \n
+  geom_rect(xmin = 50, xmax=95, ymin=76, ymax=88, colour = 'black', fill = 'white', size = 0.25) +
+annotate('text', x = 72, y = 82, label = paste(format(ALF_not_met[1,1], big.mark = ","), 'episodes removed \n due to matching threshold not met'), size = 3)+
+  geom_rect(xmin = 50, xmax=95, ymin=60, ymax=72, colour = 'black', fill = 'white', size = 0.25) +
+annotate('text', x = 72, y = 66, label = paste(format(sens_icd_cd[1,1], big.mark = ","), 'episodes removed \n due to sensitive ICD-10 code'), size = 3)+
+  geom_rect(xmin = 50, xmax=95, ymin=44, ymax=56, colour = 'black', fill = 'white', size = 0.25) +
+annotate('text', x = 72, y = 50, label = paste(format(sens_opcs_cd, big.mark = ","), 'episodes removed \n due to sensitive opcs-4 code'), size = 3)+
+    geom_rect(xmin = 50, xmax=95, ymin=28, ymax=40, colour = 'black', fill = 'white', size = 0.25) +
+annotate('text', x = 72, y = 34, label = paste(format(outside_hbs[1,1], big.mark = ","), 'episodes removed due to the \n provider being outside the Welsh Health Boards'), size = 3)+
+    geom_rect(xmin = 50, xmax=95, ymin=12, ymax=24, colour = 'black', fill = 'white', size = 0.25) +
+annotate('text', x = 72, y = 18, label = paste(format(deceased[1,1], big.mark = ","), 'episodes removed due to having \n episode start date after death date'), size = 3)+
+    geom_rect(xmin = 5, xmax=45, ymin=0, ymax=8, colour = 'black', fill = 'white', size = 0.25) +
+annotate('text', x = 25, y = 4, label = paste(format(Final_Cohort, big.mark = ","), 'episodes included in final dataset'), size = 3) -> p
+
+```
+
+```{r group1 CONSORT format, include = FALSE}
+
+p + geom_segment(x=25, xend=25, y=92, yend=8, size=0.15, linejoin = "mitre", lineend = "butt", arrow = arrow(length = unit(1, "mm"), type="closed")) +
+  geom_segment(x=25, xend=50, y=82, yend=82, size=0.15, linejoin = "mitre", lineend = "butt", arrow = arrow(length = unit(1, "mm"), type="closed")) +
+  geom_segment(x=25, xend=50, y=66, yend=66, size=0.15, linejoin = "mitre", lineend = "butt", arrow = arrow(length = unit(1, "mm"), type="closed")) +
+  geom_segment(x=25, xend=50, y=50, yend=50, size=0.15, linejoin = "mitre", lineend = "butt", arrow = arrow(length = unit(1, "mm"), type="closed")) +
+    geom_segment(x=25, xend=50, y=34, yend=34, size=0.15, linejoin = "mitre", lineend = "butt", arrow = arrow(length = unit(1, "mm"), type="closed")) +
+  geom_segment(x=25, xend=50, y=18, yend=18, size=0.15, linejoin = "mitre", lineend = "butt", arrow = arrow(length = unit(1, "mm"), type="closed")) -> p
+
+p + theme_void() -> p
+
+```
+
+```{r group1a import eps 2019 onwards, include = FALSE}
+
+eps_rollavg_sql <- paste("SELECT eps.EPI_END_DT, COUNT(eps.ALF_STS_CD) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT BETWEEN '2019-01-01' AND '",Max_New_Date,"'
+	    GROUP BY eps.EPI_END_DT
+	    ORDER BY eps.EPI_END_DT;", sep = "")
+
+eps_rollavg <- sqlQuery(channel, eps_rollavg_sql)
+
+```
+
+```{r group1a calculate rolling average, include = FALSE}
+
+eps_rollavg <- eps_rollavg %>% dplyr::mutate(eps_7day_rollavg = zoo::rollmean(NUM_OF_EPS, k=7, fill = NA))
+
+```
+
+```{r group 1a min eps recorded date, include = FALSE}
+
+min_eps <- eps_rollavg[which.min(eps_rollavg$eps_7day_rollavg),] #identify the row with the minimum value
+
+min_eps_date <- strftime(min_eps[1,1], format("%d %B %Y"))
+
+```
+
+```{r group1b percentage change episodes per month, echo=FALSE}
+
+Avg_Eps_Per_MT_Pre <- sqlQuery(channel, "SELECT MQO.EPI_END_MT, AVG(MQO.NUM_OF_EPS) AS NUM_OF_EPS
+	FROM
+	(SELECT	eps.EPI_END_YR,
+		eps.EPI_END_MT,
+		COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_YR < '2020'
+		GROUP BY 	eps.EPI_END_YR,
+					eps.EPI_END_MT) AS MQO
+		GROUP BY MQO.EPI_END_MT;")
+
+Avg_Eps_Per_MT_Post <- sqlQuery(channel, "SELECT MQO.EPI_END_MT, MQO.NUM_OF_EPS
+	FROM
+	(SELECT	eps.EPI_END_YR,
+		eps.EPI_END_MT,
+		COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_YR = '2020'
+		GROUP BY 	eps.EPI_END_YR,
+					eps.EPI_END_MT) AS MQO
+		GROUP BY MQO.EPI_END_MT,
+	          MQO.NUM_OF_EPS;")
+
+Avg_Eps_Per_MT_2021 <- sqlQuery(channel, "SELECT MQO.EPI_END_MT, MQO.NUM_OF_EPS
+	FROM
+	(SELECT	eps.EPI_END_YR,
+		eps.EPI_END_MT,
+		COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_YR = '2021'
+		GROUP BY 	eps.EPI_END_YR,
+					eps.EPI_END_MT) AS MQO
+		GROUP BY MQO.EPI_END_MT,
+	          MQO.NUM_OF_EPS;")
+
+Avg_Eps_Per_MT_perc <- merge(Avg_Eps_Per_MT_Pre, Avg_Eps_Per_MT_Post, by = "EPI_END_MT") # create 2 column table for percentage change
+
+Avg_Eps_Per_MT_perc <- Avg_Eps_Per_MT_perc %>% mutate(Perc_dif = (as.numeric(Avg_Eps_Per_MT_perc[,3] - Avg_Eps_Per_MT_perc[,2])/Avg_Eps_Per_MT_perc[,2])) # calculate percentage change as numeric for the narrative calculations
+
+Max_Perc_Change_row <- Avg_Eps_Per_MT_perc %>% filter(Perc_dif == min(Perc_dif))
+
+Avg_Eps_Per_MT_perc$Perc_dif <- scales::percent(Avg_Eps_Per_MT_perc$Perc_dif, accuracy = 1L) # change percentage change to a percentage for presenting
+
+Avg_Eps_Per_MT_Pre <- Avg_Eps_Per_MT_Pre %>% dplyr::mutate(Period = "2016-2019 avg")
+
+Avg_Eps_Per_MT_Post <- Avg_Eps_Per_MT_Post %>% dplyr::mutate(Period = "2020")
+
+Avg_Eps_Per_MT_2021 <- Avg_Eps_Per_MT_2021 %>% dplyr::mutate(Period = "2021")
+
+Avg_Eps_Per_MT_comp <- Avg_Eps_Per_MT_Pre %>%  rbind(Avg_Eps_Per_MT_Post, Avg_Eps_Per_MT_2021)
+
+Avg_Eps_Per_MT_comp$EPI_END_MT <- month.abb[Avg_Eps_Per_MT_comp$EPI_END_MT] # converts month number to abbreviated month name for the graph
+
+Avg_Eps_Per_MT_comp$EPI_END_MT <- factor(Avg_Eps_Per_MT_comp$EPI_END_MT, levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+Avg_Eps_Per_MT_perc$EPI_END_MT <- month.abb[Avg_Eps_Per_MT_perc$EPI_END_MT] # converts month number to abbreviated month name for the graph
+
+colnames(Avg_Eps_Per_MT_perc) <- c("Episode End Month", "Avg episodes 2016-2019", "Episodes 2020", "Percentage Change")
+
+colnames(Max_Perc_Change_row) <- c("Episode End Month", "Avg episodes 2016-2019", "Episodes 2020", "Percentage Change")
+
+```
+
+```{r group1b Avg eps per month exlucding 2021, include = FALSE}
+
+Avg_Eps_exc21_comp <- Avg_Eps_Per_MT_Pre %>%  rbind(Avg_Eps_Per_MT_Post)
+
+Avg_Eps_exc21_comp$EPI_END_MT <- month.abb[Avg_Eps_exc21_comp$EPI_END_MT] # converts month number to abbreviated month name for the graph
+
+Avg_Eps_exc21_comp$EPI_END_MT <- factor(Avg_Eps_exc21_comp$EPI_END_MT, levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+```
+
+
+```{r group1b percentage change figures for narrative, include = FALSE}
+
+Max_Perc_Change <- percent(Max_Perc_Change_row[1,4])
+
+Max_Perc_Change_Pre <- Max_Perc_Change_row[1,2]
+
+Max_Perc_Change_Post <- Max_Perc_Change_row[1,3]
+
+Max_Perc_Change_MT <- Max_Perc_Change_row[1,1]
+
+Max_Perc_Change_MT <- month.name[Max_Perc_Change_MT]
+
+```
+
+```{r group2 backlog by year, echo = FALSE}
+
+backlog_sql <- paste("SELECT	eps.EPI_END_YR, 
+		count(*) AS Number_of_Episodes
+	FROM SAIL0572V.PEDW_EPISODE_",ltst_extract," AS eps
+		LEFT JOIN SAIL0572V.PEDW_SPELL_",ltst_extract," AS sp
+			ON eps.PROV_UNIT_CD||eps.SPELL_NUM_PE = sp.PROV_UNIT_CD||sp.SPELL_NUM_PE 
+	WHERE eps.DIAG_CD_123 IS NULL
+		AND eps.EPI_END_YR >= '2010'
+		AND sp.ALF_STS_CD IN ('1', '4', '39')
+		AND eps.PROV_UNIT_CD IN('7A1', '7A2', '7A3', '7A4', '7A5', '7A6', '7A7', 'RQF')
+	GROUP BY eps.EPI_END_YR
+	ORDER BY eps.EPI_END_YR DESC;", sep = "")
+
+backlog <- sqlQuery(channel,backlog_sql)
+
+```
+
+```{r group3 new episodes import from SAIL, include=FALSE}
+
+New_Eps <- sqlQuery(channel, "SELECT *,
+substring(char(eps.EPI_END_DT),1,7) AS EPI_YR_MT
+FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+WHERE NOT EXISTS
+	(SELECT peps.EPI_ID
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON_PREV AS peps
+		WHERE peps.EPI_ID = eps.EPI_ID);")
+
+```
+
+```{r group3 add episode end month, week number and year+week columns, include = FALSE}
+
+New_Eps <- New_Eps %>% mutate(EPI_END_MT = format(New_Eps$EPI_END_DT, "%m"))
+
+New_Eps <- New_Eps %>% mutate(EPI_END_WK = format(New_Eps$EPI_END_DT, "%W"))
+
+New_Eps <- New_Eps %>% mutate(EPI_END_YRWK = format(New_Eps$EPI_END_DT, "%Y %W"))
+
+```
+
+```{r group3 total new episodes between reports, include=FALSE}
+Total_New_Eps <- nrow(New_Eps)
+
+Max_Date <- max(New_Eps$EPI_END_DT)
+
+Max_Date_Form <- strftime(Max_Date, format("%B %Y"))
+
+Min_Date <- min(New_Eps$EPI_END_DT)
+
+Min_Date_Form <- strftime(Min_Date, format("%B %Y"))
+
+Min_Month <- strftime(Min_Date, format("%Y-%m"))
+
+```
+
+<!-- exclude new episodes which occurred after the previous max episode date from lag data -->
+
+```{r group3 identify backlog by excluding recent episodes, include = FALSE}
+
+New_Eps_2 <- New_Eps %>% filter(EPI_END_DT < Max_Prev_Date)
+
+```
+
+```{r group3 Table of new episodes by year and week number, include = FALSE}
+
+New_Eps_Tab <- New_Eps %>% select(SPELL_ID, EPI_END_YRWK)
+
+```
+
+```{r group3 Table of new episodes by month and week number exc new period, echo = FALSE}
+
+New_Eps_Tab_2 <- New_Eps_2 %>% select(SPELL_ID, EPI_END_YRWK)
+
+Total_Lag <- nrow(New_Eps_2)
+
+```
+
+```{r group3 add lag in days to new episodes table, include = FALSE}
+
+New_Eps_2 <- New_Eps_2 %>% mutate(Lag_Length_Days = ((julian(EPI_END_DT, Max_Prev_Date))*-1)-1)
+
+Lag_Mean <- mean(New_Eps_2$Lag_Length_Days) # calculate lag mean in days
+
+Lag_Mean <- format(round(Lag_Mean, digits = 2), nsmall = 1) # round lag mean to 2 dp
+
+Lag_Mean <- as.numeric(Lag_Mean) # return lag mean to a numeric value for subsequent calculations
+
+```
+
+```{r group3 frequency table of new episodes by date, include = FALSE}
+
+New_Eps_2_Count <- New_Eps_2 %>% count(EPI_END_DT)
+
+names(New_Eps_2_Count) <- c("EPI_END_DT", "Num_of_New_Eps")
+
+New_Eps_2 <- New_Eps_2 %>% mutate(Lag_Resid = round(Lag_Length_Days - Lag_Mean,1))
+
+Max_Lag <- max(New_Eps_2$Lag_Length_Days)
+
+```
+
+```{r group3 new eps per month table, include = FALSE}
+
+New_Eps_Table <- New_Eps_2 %>% group_by(EPI_YR_MT) %>% summarise(frequency = n())
+
+New_Eps_Table$EPI_YR_MT <- as.yearmon(New_Eps_Table$EPI_YR_MT)
+
+New_Eps_Table$frequency[New_Eps_Table$frequency < 5] <- 0 #Values set to zero if the count is less than 5
+
+New_Eps_Table <- merge(Dates_Tab3, New_Eps_Table, by = "EPI_YR_MT", all=TRUE)
+
+New_Eps_Table$frequency[is.na(New_Eps_Table$frequency)] <- 0
+
+Max_New_Eps_Date <- New_Eps_Table %>% filter(frequency == max(frequency)) #filters for the month with the max number of new eps
+
+Max_New_Eps_Date <- Max_New_Eps_Date[1,1]
+                                     
+```
+
+```{r group3 New episodes reduced for graph, include = FALSE}
+
+New_Eps_Red <- New_Eps_Table %>% filter(EPI_YR_MT > "2019-04")
+
+```
+
+```{r group3 data lag rollavg, include = FALSE}
+
+New_Eps_Six_MT <- New_Eps_2_Count %>% filter(between(EPI_END_DT,Max_Prev_Date_M6,Max_Prev_Date)) #filter the new episodes to those occuring 6 months before previous report date
+
+Six_MT_Tab <- data.frame(seq(as.Date(previous_extract_M6),as.Date(previous_extract_dt[1,1]), by="days")) #generate table of dates for the 6 month period, in case any days had no recorded new episodes
+
+colnames(Six_MT_Tab) <- c("EPI_END_DT") # rename column heading for dates table
+
+New_Eps_Rollavg <- merge(x=Six_MT_Tab, y=New_Eps_Six_MT, by = "EPI_END_DT", all.x = TRUE) # merge date table with new eps table
+
+New_Eps_Rollavg <-  New_Eps_Rollavg %>% mutate(Num_of_New_Eps = if_else(is.na(Num_of_New_Eps), 0, as.double(Num_of_New_Eps))) # convert where number of new eps is NA to 0
+
+New_Eps_Rollavg <- New_Eps_Rollavg %>% dplyr::mutate(eps_7day_rollavg = zoo::rollmean(Num_of_New_Eps, k=7, fill = NA)) #added 7 day rolling avg
+
+```
+
+```{r group3 import latest extract dates, include = FALSE}
+
+Extract_dates <- sqlQuery(channel, "SELECT ed.EXTRACT_DT FROM SAILW0572V.VB_PEDW_EXTRACT_DATES AS ed ORDER BY ed.EXTRACT_DT;")
+
+Extract_dates <- format(as.character(Extract_dates$EXTRACT_DT))
+
+Extract_date1 <- Extract_dates[1]
+
+Extract_date2 <- Extract_dates[2]
+
+Extract_date3 <- Extract_dates[3]
+
+Extract_date4 <- Extract_dates[4]
+
+Extract_date5 <- Extract_dates[5]
+
+Extract_date6 <- Extract_dates[6]
+
+```
+
+```{r group3 datalag loop, include = FALSE}
+
+datalag = data.frame()
+
+for(idate in Extract_dates){
+  sql <- paste("SELECT eps.EPI_END_DT, eps.FIRST_REPORT_DT, count(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT >= '",latest_extract_M6,"'
+		AND  eps.FIRST_REPORT_DT = '",idate,"'
+	    GROUP BY	eps.EPI_END_DT,
+	    			eps.FIRST_REPORT_DT 
+	    ORDER BY 	eps.EPI_END_DT,
+	    			eps.FIRST_REPORT_DT;", sep = "")
+  sql_run <- sqlQuery(channel, sql)
+  sql_run <- merge(sql_run, Dates_Tab2, by = "EPI_END_DT", all = T)
+  sql_run$NUM_OF_EPS[is.na(sql_run$NUM_OF_EPS)] <- 0
+  sql_run <- sql_run %>% dplyr::mutate("7day_rollavg" = zoo::rollmean(sql_run$NUM_OF_EPS, k=7, fill = NA))
+  sql_run$FIRST_REPORT_DT[is.na(sql_run$FIRST_REPORT_DT)] <- idate
+  name <- paste("icd_codelag",idate, sep = "_")
+  assign(name, sql_run)
+  datalag <- datalag %>% rbind(sql_run)
+}
+
+
+datalag[is.na(datalag)] <- 0
+
+```
+
+```{r group3b import ICD-10 codelag data, include = FALSE}
+
+codelag = data.frame()
+
+for(idate in Extract_dates){
+  sql <- paste("SELECT eps.EPI_END_DT, eps.FIRST_ICD_DT, count(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+	  WHERE eps.EPI_END_DT >= '",latest_extract_M6,"'
+		AND eps.FIRST_ICD_DT = '",idate,"'
+	    GROUP BY	eps.EPI_END_DT,
+	    			eps.FIRST_ICD_DT 
+	    ORDER BY 	eps.EPI_END_DT,
+	    			eps.FIRST_ICD_DT;", sep = "")
+  icd_sql_run <- sqlQuery(channel, sql)
+  icd_sql_run <- merge(icd_sql_run, Dates_Tab2, by = "EPI_END_DT", all = T)
+  icd_sql_run$NUM_OF_EPS[is.na(icd_sql_run$NUM_OF_EPS)] <- 0
+  icd_sql_run <- icd_sql_run %>% dplyr::mutate("7day_rollavg" = zoo::rollmean(icd_sql_run$NUM_OF_EPS, k=7, fill = NA))
+  icd_sql_run$FIRST_ICD_DT[is.na(icd_sql_run$FIRST_ICD_DT)] <- idate
+  name <- paste("icd_codelag",idate, sep = "_")
+  assign(name, icd_sql_run)
+  codelag <- codelag %>% rbind(icd_sql_run)
+}
+
+
+codelag[is.na(codelag)] <- 0
+
+```
+
+```{r group3b percentage coded by data extraction date, include = FALSE}
+
+codelag_all <- merge(codelag, eps_rollavg, by = "EPI_END_DT", all.x = T)
+
+codelag_all <- codelag_all %>% mutate(Percent_Coded = `7day_rollavg`/eps_7day_rollavg)
+
+codelag_all[is.na(codelag_all)] <- 0
+
+```
+
+```{r group4 primary code changes since previous PEDW, include =FALSE}
+
+Code_Change <- sqlQuery(channel, "SELECT	peps.ALF_PE,
+		eps.DIAG_CD_123 AS DIAG_CD_123_new,
+ 		peps.DIAG_CD_123 AS DIAG_CD_123_Prev,
+    substring(char(peps.EPI_END_DT),1,7) AS EPI_YR_MT,
+    peps.EPI_END_DT
+     	FROM SAILW0572V.VB_PEDW_EPS_2015ON_PREV AS peps
+ 		LEFT JOIN SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+ 			ON eps.EPI_ID = peps.EPI_ID
+ 			WHERE eps.EPI_ID IS NOT NULL
+ 			AND (eps.DIAG_CD_123 <> peps.DIAG_CD_123
+ 			OR (peps.DIAG_CD_123 IS NULL
+ 				AND eps.DIAG_CD_123 IS NOT NULL)
+ 			OR (eps.DIAG_CD_123 IS NULL
+ 				AND peps.DIAG_CD_123 IS NOT NULL));")
+
+# Obtain the total number of episodes with code changes, including from null to an entry and vice versa, as well as the min #and max episode end dates for changes episodes.
+
+Tot_Changes_Codes <- nrow(Code_Change)
+
+Min_Code_Change_Dt <- min(Code_Change$EPI_END_DT)
+
+Min_Code_Change_Dt_Form <- strftime(Min_Code_Change_Dt, format("%B %Y"))
+
+Max_Code_Change_Dt <- max(Code_Change$EPI_END_DT)
+
+Max_Code_Change_Dt_Form <- strftime(Max_Code_Change_Dt, format("%B %Y"))
+
+Code_Match <- sqlQuery(channel, "SELECT	peps.ALF_PE,
+		eps.DIAG_CD_123 AS DIAG_CD_123_new,
+ 		peps.DIAG_CD_123 AS DIAG_CD_123_Prev,
+    substring(char(peps.EPI_END_DT),1,7) AS EPI_YR_MT,
+    peps.EPI_END_DT
+     	FROM SAILW0572V.VB_PEDW_EPS_2015ON_PREV AS peps
+ 		LEFT JOIN SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+ 			ON peps.EPI_ID = eps.EPI_ID
+ 			WHERE peps.DIAG_CD_123 = eps.DIAG_CD_123;")
+
+icd_Null <- sqlQuery(channel, "SELECT	peps.ALF_PE,
+		eps.DIAG_CD_123 AS DIAG_CD_123_new,
+ 		peps.DIAG_CD_123 AS DIAG_CD_123_Prev,
+    substring(char(peps.EPI_END_DT),1,7) AS EPI_YR_MT,
+    peps.EPI_END_DT
+     	FROM SAILW0572V.VB_PEDW_EPS_2015ON_PREV AS peps
+ 		LEFT JOIN SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+ 			ON peps.EPI_ID = eps.EPI_ID
+ 			WHERE peps.DIAG_CD_123 IS NULL
+ 				AND eps.DIAG_CD_123 IS NULL;")
+
+epi_removed <- sqlQuery(channel, "SELECT	peps.ALF_PE,
+		eps.DIAG_CD_123 AS DIAG_CD_123_new,
+ 		peps.DIAG_CD_123 AS DIAG_CD_123_Prev,
+    substring(char(peps.EPI_END_DT),1,7) AS EPI_YR_MT,
+    peps.EPI_END_DT
+      FROM SAILW0572V.VB_PEDW_EPS_2015ON_PREV AS peps
+	LEFT JOIN SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		ON peps.EPI_ID = eps.EPI_ID
+		WHERE eps.EPI_ID IS NULL;")
+
+```
+
+```{r group4 combined episodes by ICD-10 code change, include = FALSE}
+
+Code_Change <- Code_Change %>% dplyr::mutate(ICD_CODE_STS = "ICD-10 code changed")
+
+Code_Match <- Code_Match %>% dplyr::mutate(ICD_CODE_STS = "ICD-10 code unchanged")
+
+icd_Null <- icd_Null %>% dplyr::mutate(ICD_CODE_STS = "ICD-10 code null")
+
+epi_removed <- epi_removed %>% dplyr::mutate(ICD_CODE_STS = "episode removed")
+
+All_icd_Eps <- Code_Change %>% rbind(Code_Match, icd_Null, epi_removed)
+
+All_icd_Eps <- All_icd_Eps %>% filter(EPI_YR_MT > "2019-12" & EPI_YR_MT <= end_of_prev_yearmon) # filters so that the graph only includes proportions from 2020
+
+All_icd_Eps$EPI_YR_MT <- as.yearmon(All_icd_Eps$EPI_YR_MT)
+
+Colour_table <- tibble(Colour = c("#44aa99","#332288","#ddcc77","#882255"))
+
+```
+
+```{r group4 ICD Changes summarised, include= FALSE}
+
+All_icd_Eps2 <- All_icd_Eps %>% group_by(EPI_YR_MT, ICD_CODE_STS) %>% summarise(count = n()) %>% as.data.frame()
+
+```
+
+```{r group4 code changes in the last six months, include = FALSE}
+
+Six_MT_Prev <- Max_Prev_Date %m-% months(6) #calculate date six months before report end date
+
+Code_Change_Six_MT <- count(filter(Code_Change, between(EPI_END_DT,Max_Prev_Date_M6, Max_Prev_Date))) #count code changes which occurred within the last six months
+
+Perc_Six_MT <- Code_Change_Six_MT / Tot_Changes_Codes #calculate the % of code changes which occurred within the last 6 months
+
+Perc_Six_MT <- scales::percent(Perc_Six_MT[1,1]) #change format to a percentage
+
+```
+
+```{r group4 code changes in the last six months table, include = FALSE}
+
+Code_Change_By_Month <- Code_Change %>% group_by(EPI_YR_MT) %>% summarise(frequency = n())
+
+Code_Change_By_Month$EPI_YR_MT <- as.yearmon(Code_Change_By_Month$EPI_YR_MT)
+
+Code_Change_By_Month$frequency[Code_Change_By_Month$frequency < 5] <- 0 #Values set to zero if the count is less than 5
+
+Code_Change_By_Month <- Code_Change_By_Month %>% filter(EPI_YR_MT > "Mar 2020") #Added to better plot graph following data lag update
+
+```
+
+```{r group4 count uncoded episodes, include = FALSE}
+
+eps_no_diag <- sqlQuery(channel, "SELECT COUNT FROM (SELECT *
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.DIAG_CD_123 IS NULL
+	  AND eps.EPI_END_DT >= '2019-04-01') AS MQO;")
+
+spells_no_diag <- sqlQuery(channel, "SELECT COUNT FROM (SELECT eps.SPELL_NUM_PE
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.DIAG_CD_123 IS NULL
+	  AND eps.EPI_END_DT >= '2019-04-01'
+			GROUP BY eps.SPELL_NUM_PE) AS MQO;")
+
+eps_diag_other <- sqlQuery(channel, "SELECT COUNT FROM (SELECT eps.SPELL_NUM_PE, eps2.DIAG_CD_123
+	FROM (SELECT MQO.SPELL_NUM_PE, MQO.DIAG_CD_123 
+			FROM SAILW0572V.VB_PEDW_EPS_2015ON AS MQO
+				WHERE MQO.DIAG_CD_123 IS NULL) AS eps
+	LEFT JOIN SAILW0572V.VB_PEDW_EPS_2015ON AS eps2
+		ON eps.SPELL_NUM_PE = eps2.SPELL_NUM_PE
+			WHERE eps2.DIAG_CD_123 IS NOT NULL
+	    AND eps2.EPI_END_DT >= '2019-04-01') AS sub;") #checks whether there is another episode within the spell with a diagnosis code
+
+Perc_Spells_w_Other <- eps_diag_other/spells_no_diag # calculate percentage of uncoded episodes which have a coded episode for another episode in the spell
+
+Perc_Spells_w_Other <- scales::percent(Perc_Spells_w_Other[1,1]) #change format to a percentage
+
+```
+
+```{r group4a chord diagram for ICD diag changes by chapter, include = FALSE, fig.height=7, fig.width=7}
+
+#Only includes coded episodes from previous report (not those where ICD code has been added or removed).  Where there has been a change in diagnosis code within the same chapter this is still displayed on the chart and will show as changing from 2 to 2 e.g.
+
+Chap_Changes_Diag <- sqlQuery(channel, "SELECT	peps.CHAPTER_NUMBER AS CHAPTER_FROM,
+		eps.CHAPTER_NUMBER AS CHAPTER_TO,
+ 		COUNT(peps.ALF_PE) AS NUM_OF_EPS
+     	FROM SAILW0572V.VB_PEDW_EPS_2015ON_PREV AS peps
+ 		LEFT JOIN SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+ 			ON eps.EPI_ID = peps.EPI_ID
+ 			WHERE eps.EPI_ID IS NOT NULL
+ 			AND peps.CHAPTER_NUMBER IS NOT NULL
+ 			AND eps.CHAPTER_NUMBER IS NOT NULL
+ 			AND (eps.DIAG_CD_123 <> peps.DIAG_CD_123
+ 			OR (peps.DIAG_CD_123 IS NULL
+ 				AND eps.DIAG_CD_123 IS NOT NULL)
+ 			OR (eps.DIAG_CD_123 IS NULL
+ 				AND peps.DIAG_CD_123 IS NOT NULL))
+ 		GROUP BY eps.CHAPTER_NUMBER, peps.CHAPTER_NUMBER;")
+
+#Replace NAs with 0
+
+Chap_Changes_Diag[is.na(Chap_Changes_Diag)] <- 0
+
+```
+
+```{r group4a chord diagram for ICD chapter changes, include = FALSE, fig.height=7, fig.width=7}
+
+#Only includes coded episodes from previous report (not those where ICD code has been added or removed).  Only shows where there has been a change between chapters and not within
+
+Chap_Changes <- sqlQuery(channel, "SELECT	peps.CHAPTER_NUMBER AS CHAPTER_FROM,
+		eps.CHAPTER_NUMBER AS CHAPTER_TO,
+ 		COUNT(peps.ALF_PE) AS NUM_OF_EPS
+     	FROM SAILW0572V.VB_PEDW_EPS_2015ON_PREV AS peps
+ 		LEFT JOIN SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+ 			ON eps.EPI_ID = peps.EPI_ID
+ 			WHERE eps.EPI_ID IS NOT NULL
+ 			AND peps.CHAPTER_NUMBER IS NOT NULL
+ 			AND eps.CHAPTER_NUMBER IS NOT NULL
+ 			AND eps.CHAPTER_NUMBER <> peps.CHAPTER_NUMBER
+ 		GROUP BY eps.CHAPTER_NUMBER, peps.CHAPTER_NUMBER;")
+
+#Replace NAs with 0
+
+Chap_Changes[is.na(Chap_Changes)] <- 0
+
+```
+
+```{r group5 import episodes frequency table, include = FALSE}
+
+eps_freq_sql <- paste("SELECT	eps.EPI_END_YR,
+		substring(char(eps.EPI_END_DT),1,7) AS EPI_YR_MT,
+		COUNT(eps.SPELL_NUM_PE) AS NUM_OF_EPS
+ 	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+ 	WHERE eps.EPI_END_DT >= '2019-04-01'
+ 	AND eps.EPI_END_DT <= '",end_of_curr_mt,"'
+ 		GROUP BY	eps.EPI_END_YR,
+					substring(char(eps.EPI_END_DT),1,7)
+			ORDER BY	substring(char(eps.EPI_END_DT),1,7);", sep = "")
+
+eps_freq <- sqlQuery(channel, eps_freq_sql)
+
+#change format of EPI_YR_MT to date
+eps_freq$EPI_YR_MT <- as.yearmon(eps_freq$EPI_YR_MT)
+
+icd_null_freq <- sqlQuery(channel, "SELECT	eps.EPI_END_YR,
+		substring(char(eps.EPI_END_DT),1,7) AS EPI_YR_MT,
+		COUNT(eps.SPELL_NUM_PE) AS NUM_OF_EPS
+ 	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+ 	WHERE eps.EPI_END_DT >= '2019-04-01'
+ 	AND eps.DIAG_CD_123 IS NULL
+ 		GROUP BY	eps.EPI_END_YR,
+					substring(char(eps.EPI_END_DT),1,7)
+			ORDER BY	substring(char(eps.EPI_END_DT),1,7);")
+
+#change format of EPI_YR_MT to date
+icd_null_freq$EPI_YR_MT <- as.yearmon(icd_null_freq$EPI_YR_MT)
+
+```
+
+```{r group5 percentage of eps with null ICD, include = FALSE}
+
+perc_icd_null <- merge(eps_freq, icd_null_freq, by="EPI_YR_MT")
+
+perc_icd_null <- subset(perc_icd_null, select = -EPI_END_YR.y)
+
+colnames(perc_icd_null) <- c("EPI_YR_MT", "EPI_END_YR", "TOTAL_EPS", "UNCODED_EPS")
+
+perc_icd_null <- perc_icd_null %>% mutate(PERC_NULL = (perc_icd_null$UNCODED_EPS/perc_icd_null$TOTAL_EPS)*100)
+
+```
+
+```{r group5 percentage change icd code missing per month, echo=FALSE}
+
+Avg_ICDNULL_Per_MT_Pre <- sqlQuery(channel, "SELECT MQO.EPI_END_MT, AVG(MQO.NUM_OF_EPS) AS NUM_OF_EPS
+	FROM
+	(SELECT	eps.EPI_END_YR,
+		eps.EPI_END_MT,
+		COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_YR < '2020'
+		AND eps.DIAG_CD_123 IS NULL
+		GROUP BY 	eps.EPI_END_YR,
+					eps.EPI_END_MT) AS MQO
+		GROUP BY MQO.EPI_END_MT;")
+
+Avg_ICDNULL_Per_MT_Post <- sqlQuery(channel, "SELECT MQO.EPI_END_MT,
+		MQO.NUM_OF_EPS
+	FROM
+	(SELECT	eps.EPI_END_YR,
+		eps.EPI_END_MT,
+		COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_YR = '2020'
+		AND eps.DIAG_CD_123 IS NULL
+		GROUP BY 	eps.EPI_END_YR,
+					eps.EPI_END_MT) AS MQO
+		GROUP BY MQO.EPI_END_MT,
+				MQO.NUM_OF_EPS;")
+
+Avg_ICDNULL_Per_MT_2021 <- sqlQuery(channel, "SELECT MQO.EPI_END_MT,
+		MQO.NUM_OF_EPS
+	FROM
+	(SELECT	eps.EPI_END_YR,
+		eps.EPI_END_MT,
+		COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_YR = '2021'
+		AND eps.DIAG_CD_123 IS NULL
+		GROUP BY 	eps.EPI_END_YR,
+					eps.EPI_END_MT) AS MQO
+		GROUP BY MQO.EPI_END_MT,
+				MQO.NUM_OF_EPS;")
+
+Avg_ICDNULL_Per_MT_perc <- merge(Avg_ICDNULL_Per_MT_Pre, Avg_ICDNULL_Per_MT_Post, by ="EPI_END_MT") # create 2 column table for percentage change
+
+Avg_ICDNULL_Per_MT_perc <- Avg_ICDNULL_Per_MT_perc %>% mutate(Perc_dif = scales::percent((Avg_ICDNULL_Per_MT_perc[,3] - Avg_ICDNULL_Per_MT_perc[,2])/Avg_ICDNULL_Per_MT_perc[,2], accuracy = 1L))
+
+Avg_ICDNULL_Per_MT_Pre <- Avg_ICDNULL_Per_MT_Pre %>% dplyr::mutate(Period = "2016-2019 avg")
+
+Avg_ICDNULL_Per_MT_Pre <- Avg_ICDNULL_Per_MT_Pre %>% arrange(EPI_END_MT)
+
+Avg_ICDNULL_Per_MT_Post <- Avg_ICDNULL_Per_MT_Post %>% dplyr::mutate(Period = "2020")
+
+Avg_ICDNULL_Per_MT_Post <- Avg_ICDNULL_Per_MT_Post %>% arrange(EPI_END_MT)
+
+Avg_ICDNULL_Per_MT_2021 <- Avg_ICDNULL_Per_MT_2021 %>% dplyr::mutate(Period="2021")
+
+Avg_ICDNULL_Per_MT_2021 <- Avg_ICDNULL_Per_MT_2021 %>%arrange(EPI_END_MT)
+
+Avg_ICDNULL_Per_MT_comp <- Avg_ICDNULL_Per_MT_Pre %>%  rbind(Avg_ICDNULL_Per_MT_Post, Avg_ICDNULL_Per_MT_2021)
+
+Avg_ICDNULL_Per_MT_comp <- Avg_ICDNULL_Per_MT_comp %>% arrange(EPI_END_MT)
+
+Avg_ICDNULL_Per_MT_comp$EPI_END_MT <- month.abb[Avg_ICDNULL_Per_MT_comp$EPI_END_MT] # converts month number to abbreviated month name for the graph
+
+Avg_ICDNULL_Per_MT_perc$EPI_END_MT <- month.abb[Avg_ICDNULL_Per_MT_perc$EPI_END_MT] # converts month number to abbreviated month name for the graph
+
+colnames(Avg_ICDNULL_Per_MT_perc) <- c("Episode End Month", "2016-19 uncoded", "2020 uncoded", "Percentage Change")
+
+Avg_ICDNULL_Per_MT_comp$EPI_END_MT <- factor(Avg_ICDNULL_Per_MT_comp$EPI_END_MT, levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+```
+
+```{r group5 pre 2021 percentage change icd code missing per month, echo=FALSE}
+
+Avg_ICDNULL_exc21_comp <- Avg_ICDNULL_Per_MT_Pre %>%  rbind(Avg_ICDNULL_Per_MT_Post)
+
+Avg_ICDNULL_exc21_comp <- Avg_ICDNULL_exc21_comp %>% arrange(EPI_END_MT)
+
+Avg_ICDNULL_exc21_comp$EPI_END_MT <- month.abb[Avg_ICDNULL_exc21_comp$EPI_END_MT] # converts month number to abbreviated month name for the graph
+
+Avg_ICDNULL_exc21_comp$EPI_END_MT <- factor(Avg_ICDNULL_exc21_comp$EPI_END_MT, levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+```
+
+
+```{r group5 percentage of uncoded episodes, include= FALSE}
+
+Prop_Null_ICD_comp <- merge(Avg_Eps_Per_MT_comp, Avg_ICDNULL_Per_MT_comp, by = c("EPI_END_MT", "Period"), all = T)
+
+colnames(Prop_Null_ICD_comp) <- c("Episode End Month", "Period", "Episodes", "Null_ICD")
+
+Prop_Null_ICD_comp <- Prop_Null_ICD_comp %>% mutate(proportion = Null_ICD / Episodes)
+
+Prop_Null_ICD_comp$`Episode End Month` <- match(Prop_Null_ICD_comp$`Episode End Month`, month.abb)
+
+Prop_Null_ICD_comp <- Prop_Null_ICD_comp %>% arrange(`Period`,`Episode End Month`)
+
+Prop_Null_ICD_comp$`Episode End Month` <- month.abb[Prop_Null_ICD_comp$`Episode End Month`]
+
+Prop_Null_ICD_comp$`Episode End Month` <- factor(Prop_Null_ICD_comp$`Episode End Month`, levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+```
+
+```{r group5 percentage of uncoded episodes exc 2021, include= FALSE}
+
+Prop_Null_ICD_comp_exc21 <- merge(Avg_Eps_exc21_comp, Avg_ICDNULL_exc21_comp, by = c("EPI_END_MT", "Period"), all = T)
+
+colnames(Prop_Null_ICD_comp_exc21) <- c("Episode End Month", "Period", "Episodes", "Null_ICD")
+
+Prop_Null_ICD_comp_exc21 <- Prop_Null_ICD_comp_exc21 %>% mutate(proportion = Null_ICD / Episodes)
+
+Prop_Null_ICD_comp_exc21$`Episode End Month` <- match(Prop_Null_ICD_comp_exc21$`Episode End Month`, month.abb)
+
+Prop_Null_ICD_comp_exc21 <- Prop_Null_ICD_comp_exc21 %>% arrange(`Period`,`Episode End Month`)
+
+Prop_Null_ICD_comp_exc21$`Episode End Month` <- month.abb[Prop_Null_ICD_comp_exc21$`Episode End Month`]
+
+Prop_Null_ICD_comp_exc21$`Episode End Month` <- factor(Prop_Null_ICD_comp_exc21$`Episode End Month`, levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+```
+
+```{r group6 import frequency table episodes by Chapter by month, include = FALSE}
+
+chap_freq_sql <- paste("SELECT eps.EPI_END_YR,
+		substring(char(eps.EPI_END_DT),1,7) AS EPI_YR_MT,
+		icd.CHAPTER_NUMBER,
+		COUNT(eps.SPELL_NUM_PE) AS NUM_OF_EPS
+ 	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+ 		LEFT JOIN SAILUKHDV.ICD10_CODES_AND_TITLES_AND_METADATA_",latest_icd_meta_extract," AS icd
+ 			ON eps.DIAG_CD_1234 = icd.ALT_CODE
+ 		GROUP BY	eps.EPI_END_YR,
+					substring(char(eps.EPI_END_DT),1,7),
+					icd.CHAPTER_NUMBER
+			ORDER BY	substring(char(eps.EPI_END_DT),1,7),
+						icd.CHAPTER_NUMBER;", sep = "")
+
+chap_freq <- sqlQuery(channel, chap_freq_sql)
+
+```
+
+```{r group5a 75% coded data import, include = FALSE}
+
+uncoded_eps <- sqlQuery(channel, "SELECT eps.EPI_END_DT, COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT > '2020-03-31'
+			AND eps.DIAG_CD_1234 IS NULL
+		GROUP BY eps.EPI_END_DT
+	  ORDER BY eps.EPI_END_DT;")
+
+uncoded_eps <- uncoded_eps %>% dplyr::mutate(`7day_rollavg` = zoo::rollmean(NUM_OF_EPS, k=7, fill = NA)) #added 7 day rolling avg
+
+uncoded_eps <- uncoded_eps %>% dplyr::mutate(coding_status = "Uncoded")
+
+coded_eps <- sqlQuery(channel, "SELECT eps.EPI_END_DT, COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT > '2020-03-31'
+			AND eps.DIAG_CD_1234 IS NOT NULL
+		GROUP BY eps.EPI_END_DT
+	  ORDER BY eps.EPI_END_DT;")
+
+coded_eps <- coded_eps %>% dplyr::mutate(`7day_rollavg` = zoo::rollmean(NUM_OF_EPS, k=7, fill = NA)) #added 7 day rolling avg
+
+coded_eps <- coded_eps %>% dplyr::mutate(coding_status = "Coded")
+
+coding_confidence <- coded_eps %>% rbind(uncoded_eps)
+
+all_eps <- sqlQuery(channel, "SELECT eps.EPI_END_DT, COUNT(eps.ALF_PE) AS NUM_OF_EPS_ALL
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT > '2020-03-31'
+		GROUP BY eps.EPI_END_DT
+	  ORDER BY eps.EPI_END_DT;")
+
+coding_perc <- merge(all_eps, coded_eps, by = "EPI_END_DT") # create 2 column table for percentage coded calculation
+
+coding_perc <- coding_perc %>% dplyr::mutate("Percentage Coded" = NUM_OF_EPS / NUM_OF_EPS_ALL) #calculate percentage coded
+
+coding_perc <- coding_perc %>% dplyr::mutate(`7day_rollavg` = zoo::rollmean("Percentage Coded", k=7, fill = NA)) # add 7 day rolling avg percentage coded
+
+coding_conf_table <- coding_perc %>% filter(coding_perc$`Percentage Coded` > 0.9)
+
+coding_conf_date <- max(coding_conf_table$EPI_END_DT)
+  
+```
+
+```{r group5a average coded percentage 2020, include = FALSE, warning = FALSE}
+
+#calculates the average percentage of episodes coded in 2020
+
+uncoded_eps_2020 <- sqlQuery(channel, "SELECT COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT BETWEEN '2020-01-01' AND '2020-12-31'
+			AND eps.DIAG_CD_1234 IS NULL
+		GROUP BY eps.EPI_END_YR;")
+
+total_eps_2020 <- sqlQuery(channel, "SELECT COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT BETWEEN '2020-01-01' AND '2020-12-31'
+		GROUP BY eps.EPI_END_YR;")
+
+avg_coded_2020 <- 1-(uncoded_eps_2020/total_eps_2020)
+
+```
+
+```{r group5a average coded percentage 2019, include = FALSE}
+
+#calculates the average percentage of episodes coded between January and December 2019 
+
+uncoded_eps_2019 <- sqlQuery(channel, "SELECT COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT BETWEEN '2019-01-01' AND '2019-12-31'
+			AND eps.DIAG_CD_1234 IS NULL
+		GROUP BY eps.EPI_END_YR;")
+
+total_eps_2019 <- sqlQuery(channel, "SELECT COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT BETWEEN '2019-01-01' AND '2019-12-31'
+		GROUP BY eps.EPI_END_YR;")
+
+avg_coded_2019 <- 1-(uncoded_eps_2019/total_eps_2019)
+
+```
+
+```{r group5a average coded percentage 2018, include = FALSE}
+
+#calculates the average percentage of episodes coded between January and December 2018 
+
+uncoded_eps_2018 <- sqlQuery(channel, "SELECT COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT BETWEEN '2018-01-01' AND '2018-12-31'
+			AND eps.DIAG_CD_1234 IS NULL
+		GROUP BY eps.EPI_END_YR;")
+
+total_eps_2018 <- sqlQuery(channel, "SELECT COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT BETWEEN '2018-01-01' AND '2018-12-31'
+		GROUP BY eps.EPI_END_YR;")
+
+avg_coded_2018 <- 1-(uncoded_eps_2018/total_eps_2018)
+
+```
+
+```{r group6 format freq data types, include = FALSE}
+
+chap_freq$CHAPTER_NUMBER <- as.factor(chap_freq$CHAPTER_NUMBER) # Change chapter number to a factor
+
+chap_freq2 <- chap_freq
+
+chap_freq2$EPI_YR_MT <- as.yearmon(chap_freq2$EPI_YR_MT) # change format of year-month for plotting
+
+```
+
+```{r group6 import ICD-10 chapter table data, include= FALSE}
+
+chap_tab_sql <-  paste("SELECT DISTINCT(icd.CHAPTER_NUMBER), icd.CHAPTER_DESCRIPTION
+	FROM SAILUKHDV.ICD10_CODES_AND_TITLES_AND_METADATA_",latest_icd_meta_extract," AS icd
+		WHERE icd.CHAPTER_NUMBER IS NOT NULL
+		ORDER BY icd.CHAPTER_NUMBER;", sep = "")
+
+chap_tab <- sqlQuery(channel,chap_tab_sql)
+
+```
+
+```{r group6 Apr-Dec 2019 avg monthly eps by chap, include = FALSE}
+
+chap_freq_2019 <- chap_freq %>% filter(EPI_YR_MT %in% c('2019-04', '2019-05', '2019-06', '2019-07', '2019-08', '2019-09', '2019-10', '2019-11', '2019-12')) #filtered subset for relevant months
+
+chap_mean_2019 <- setNames(aggregate(chap_freq_2019[,4], list(chap_freq_2019$CHAPTER_NUMBER), mean), c("Chapter Number","2019 Mean Eps")) # calculate prov mean for relevant months, and assign column names
+
+chap_freq_2020 <- chap_freq %>% filter(EPI_YR_MT %in% c('2020-04', '2020-05', '2020-06', '2020-07', '2020-08', '2020-09', '2020-10', '2020-11', '2020-12'))
+
+chap_mean_2020 <- setNames(aggregate(chap_freq_2020[,4], list(chap_freq_2020$CHAPTER_NUMBER), mean), c("Chapter Number", "2020 Mean Eps"))
+
+chap_mean_comp <- merge(chap_mean_2019, chap_mean_2020, by = "Chapter Number", all = T) # combine provider means into a single table, all = T ensures that added or removed chapters still appear in the table
+
+```
+
+```{r group6 calculate chap percentage change, echo = FALSE}
+
+chap_mean_comp <- chap_mean_comp %>% mutate(Perc_dif = (chap_mean_comp[,3] - chap_mean_comp[,2])/chap_mean_comp[,2])
+
+chap_mean_comp <- chap_mean_comp %>% arrange(desc(Perc_dif))
+
+chap_mean_comp <- chap_mean_comp %>% filter(`Chapter Number` != "22") #Excludes Chapter 22 from the calculation due to having only 1 episode in 2019
+
+colnames(chap_mean_comp) <- c("Chapter number", "2019 mean eps.", "2020 mean eps.", "Percentage change")
+
+```
+
+```{r group6 count of  chapters more than halved eps, include = FALSE}
+
+chap_dif_min <- min(abs(chap_mean_comp$`Percentage change`), na.rm = TRUE) # obtain min percentage difference
+
+chap_dif_min <- scales::percent(chap_dif_min, accuracy = 1L)
+
+chapter_dif_min <- which.min(abs(chap_mean_comp$`Percentage change`)) #pre to following argument
+
+chapter_dif_min <- print(chapter_dif_min <- chap_mean_comp[`chapter_dif_min`,1], max.levels = 0) #obtain chapter number with max percentage difference
+
+chapter_dif_min_desc <- chap_tab %>% filter(CHAPTER_NUMBER == chapter_dif_min)
+
+chapter_dif_min_desc <- chapter_dif_min_desc[1,2]
+
+chap_dif_max <- max(abs(chap_mean_comp$`Percentage change`), na.rm = TRUE) #obtain max percentage difference
+
+chap_dif_max <- scales::percent(chap_dif_max, accuracy = 1L)
+
+chapter_dif_max <- which.max(abs(chap_mean_comp$`Percentage change`)) #pre to following argument
+
+chapter_dif_max <- print(chapter_dif_max <- chap_mean_comp[`chapter_dif_max`,1], max.levels = 0) #obtain chapter number with max percentage difference
+
+chapter_dif_max_desc <- chap_tab %>% filter(CHAPTER_NUMBER == chapter_dif_max)
+
+chapter_dif_max_desc <- chapter_dif_max_desc[1,2]
+
+chap_big_dif <- sum(chap_mean_comp$`Percentage change` < -0.5, na.rm = TRUE)
+
+chap_mean_comp$`Percentage change` <- scales::percent(chap_mean_comp$`Percentage change`, accuracy = 1L)
+
+```
+
+```{r group 6 icd chapter rolling averages, include = FALSE}
+
+ICD_Codes <- c("1", "2", "3", "4", "5", "6", "7", "9", "10", "11", "12", "13", "14", "15", "16", "18", "19", "21", "22") # chapters 8 and 17 excluded due to small numbers
+
+icd_rollavg_all = data.frame()
+
+for(icdcode in ICD_Codes){
+  sql <- paste("SELECT eps.EPI_END_DT, COUNT(eps.ALF_STS_CD) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.CHAPTER_NUMBER = '",icdcode,"'
+		AND eps. EPI_END_DT >= '",Dates_Start,"'
+		    GROUP BY	eps.EPI_END_DT
+		    ORDER BY 	eps.EPI_END_DT;", sep = "")
+  icd_sql_run <- sqlQuery(channel, sql)
+  icd_sql_run <- merge(icd_sql_run, Dates_Tab, by = "EPI_END_DT", all = T)
+  icd_sql_run$NUM_OF_EPS[is.na(icd_sql_run$NUM_OF_EPS)] <- 0
+  icd_sql_run <- icd_sql_run %>% dplyr::mutate(CHAPTER_NUMBER = icdcode)
+  icd_sql_run <- icd_sql_run %>% dplyr::mutate("eps_7day_rollavg" = zoo::rollmean(icd_sql_run$NUM_OF_EPS, k=7, fill = NA))
+  icd_sql_run$CHAPTER_NUMBER[is.na(icd_sql_run$CHAPTER_NUMBER)] <- icdcode
+  name <- paste("icd_rollavg",idate, sep = "_")
+  assign(name, icd_sql_run)
+  icd_rollavg_all <- icd_rollavg_all %>% rbind(icd_sql_run)
+}
+
+
+icd_rollavg_all[is.na(icd_rollavg_all)] <- 0
+
+#Add ICD Chapter description
+
+icd_rollavg_all <- merge(icd_rollavg_all, chap_tab, by = "CHAPTER_NUMBER")
+
+#Concatenate chapter number and description
+
+icd_rollavg_all <- icd_rollavg_all %>% mutate(ICD_CODE = paste(icd_rollavg_all$CHAPTER_NUMBER, icd_rollavg_all$CHAPTER_DESCRIPTION, sep=" - "))
+
+```
+
+```{r group6a codelag by icd chapter table, include = FALSE}
+
+ICD_Codes <- c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "21", "22")
+
+codelag_icd_all = data.frame()
+
+for(idate in Extract_dates){
+  for(icdcode in ICD_Codes){
+  sql <- paste("SELECT eps.EPI_END_DT, eps.FIRST_ICD_DT, eps.CHAPTER_NUMBER, count(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+	  WHERE eps.EPI_END_DT >= '",latest_extract_M6,"'
+		AND eps.FIRST_ICD_DT = '",idate,"'
+		AND eps.CHAPTER_NUMBER = '",icdcode,"'
+	    GROUP BY	eps.EPI_END_DT,
+	    			eps.FIRST_ICD_DT,
+	    			eps.CHAPTER_NUMBER
+	    ORDER BY 	eps.EPI_END_DT,
+	    			eps.CHAPTER_NUMBER,
+	    			eps.FIRST_ICD_DT;", sep = "")
+  icd_sql_run <- sqlQuery(channel, sql)
+  icd_sql_run <- merge(icd_sql_run, Dates_Tab2, by = "EPI_END_DT", all = T)
+  icd_sql_run$NUM_OF_EPS[is.na(icd_sql_run$NUM_OF_EPS)] <- 0
+  icd_sql_run <- icd_sql_run %>% dplyr::mutate("7day_rollavg" = zoo::rollmean(icd_sql_run$NUM_OF_EPS, k=7, fill = NA))
+  icd_sql_run$FIRST_ICD_DT[is.na(icd_sql_run$FIRST_ICD_DT)] <- idate
+  icd_sql_run$CHAPTER_NUMBER[is.na(icd_sql_run$CHAPTER_NUMBER)] <- icdcode
+  name <- paste("codelag_icd",idate, sep = "_")
+  assign(name, icd_sql_run)
+  codelag_icd_all <- codelag_icd_all %>% rbind(icd_sql_run)
+}
+}
+
+codelag_icd_all[is.na(codelag_icd_all)] <- 0
+
+codelag_icd_all <- merge(codelag_icd_all, chap_tab, by = "CHAPTER_NUMBER")
+
+#Concatenate chapter number and description
+
+codelag_icd_all <- codelag_icd_all %>% mutate(ICD_CODE = paste(codelag_icd_all$CHAPTER_NUMBER, codelag_icd_all$CHAPTER_DESCRIPTION, sep=" - "))
+
+```
+
+```{r group6a codelag by icd chapter table adusted y-axis, include = FALSE}
+
+ICD_Codes <- c("1", "2", "3", "4", "5", "6", "7", "9", "10", "11", "12", "13", "14", "15", "16", "18", "19", "21", "22") # Chapters 8 and 17 excluded due to small numbers
+
+codelag_icd_all_adjy = data.frame()
+
+for(idate in Extract_dates){
+  for(icdcode in ICD_Codes){
+  sql <- paste("SELECT eps.EPI_END_DT, eps.FIRST_ICD_DT, eps.CHAPTER_NUMBER, count(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+	  WHERE eps.EPI_END_DT >= '",latest_extract_M6,"'
+		AND eps.FIRST_ICD_DT = '",idate,"'
+		AND eps.CHAPTER_NUMBER = '",icdcode,"'
+	    GROUP BY	eps.EPI_END_DT,
+	    			eps.FIRST_ICD_DT,
+	    			eps.CHAPTER_NUMBER
+	    ORDER BY 	eps.EPI_END_DT,
+	    			eps.CHAPTER_NUMBER,
+	    			eps.FIRST_ICD_DT;", sep = "")
+  icd_sql_run <- sqlQuery(channel, sql)
+  icd_sql_run <- merge(icd_sql_run, Dates_Tab2, by = "EPI_END_DT", all = T)
+  icd_sql_run$NUM_OF_EPS[is.na(icd_sql_run$NUM_OF_EPS)] <- 0
+  icd_sql_run <- icd_sql_run %>% dplyr::mutate("7day_rollavg" = zoo::rollmean(icd_sql_run$NUM_OF_EPS, k=7, fill = NA))
+  icd_sql_run$FIRST_ICD_DT[is.na(icd_sql_run$FIRST_ICD_DT)] <- idate
+  icd_sql_run$CHAPTER_NUMBER[is.na(icd_sql_run$CHAPTER_NUMBER)] <- icdcode
+  name <- paste("codelag_icd",idate, sep = "_")
+  assign(name, icd_sql_run)
+  codelag_icd_all_adjy <- codelag_icd_all_adjy %>% rbind(icd_sql_run)
+}
+}
+
+codelag_icd_all_adjy[is.na(codelag_icd_all_adjy)] <- 0
+
+codelag_icd_all_adjy <- merge(codelag_icd_all_adjy, chap_tab, by = "CHAPTER_NUMBER")
+
+#Concatenate chapter number and description
+
+codelag_icd_all_adjy <- codelag_icd_all_adjy %>% mutate(ICD_CODE = paste(codelag_icd_all_adjy$CHAPTER_NUMBER, codelag_icd_all_adjy$CHAPTER_DESCRIPTION, sep=" - "))
+
+```
+
+```{r group7 icd cat1 freq, include = FALSE}
+
+cat1_freq_1920 <- sqlQuery(channel, "SELECT 	eps.CATEGORY_1_DESCRIPTION,
+		COUNT(*) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+	WHERE eps.EPI_END_DT BETWEEN '2019-04-01' AND '2020-03-31'
+	AND eps.CATEGORY_1_DESCRIPTION IS NOT NULL
+		GROUP BY eps.CATEGORY_1_DESCRIPTION
+			ORDER BY eps.CATEGORY_1_DESCRIPTION;")
+
+cat1_freq_2021 <- sqlQuery(channel, "SELECT 	eps.CATEGORY_1_DESCRIPTION,
+		COUNT(*) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+	WHERE eps.EPI_END_DT BETWEEN '2020-04-01' AND '2021-03-31'
+	AND eps.CATEGORY_1_DESCRIPTION IS NOT NULL
+		GROUP BY eps.CATEGORY_1_DESCRIPTION
+			ORDER BY eps.CATEGORY_1_DESCRIPTION;")
+
+```
+
+```{r group7 episodes by ICD cat1 description, include = FALSE}
+
+colnames(cat1_freq_1920) <- c("Category 1 Description", "19/20 Episodes")
+
+colnames(cat1_freq_2021) <- c("Category 1 Description", "20/21 Episodes")
+
+cat1_freq_comp <- merge(cat1_freq_1920, cat1_freq_2021, by = "Category 1 Description", all = T) # combine cat1 counts into a single table, all = T ensures that added or removed chapters still appear in the table
+
+```
+
+```{r group7 calculate cat1 percentage change, echo = FALSE, warning = FALSE}
+
+cat1_freq_comp <- cat1_freq_comp %>% mutate(Perc_dif = (cat1_freq_comp[,3] - cat1_freq_comp[,2])/cat1_freq_comp[,2]) # percentage difference column added, rounded to nearest integer
+
+cat1_freq_comp$`19/20 Episodes` <- as.numeric(format(round(cat1_freq_comp$`19/20 Episodes`, digits = 2), nsmall = 1))
+
+cat1_freq_comp$`20/21 Episodes` <- as.numeric(format(round(cat1_freq_comp$`20/21 Episodes`, digits = 2), nsmall = 1))
+
+cat1_freq_comp <- cat1_freq_comp %>% arrange(Perc_dif, decreasing = TRUE)
+
+cat1_freq_comp$`20/21 Episodes`[is.na(cat1_freq_comp$`20/21 Episodes`)] <- 0
+
+cat1_freq_comp$`19/20 Episodes`[is.na(cat1_freq_comp$`19/20 Episodes`)] <- 0
+
+cat1_freq_comp$Perc_dif <- ifelse(cat1_freq_comp$`19/20 Episodes` < 5 | cat1_freq_comp$`20/21 Episodes` < 5, "less than 5", scales::percent((cat1_freq_comp[,3] - cat1_freq_comp[,2])/cat1_freq_comp[,2], accuracy = 1L))
+
+cat1_freq_comp$`19/20 Episodes`[cat1_freq_comp$`19/20 Episodes` < 5] <- "<5" #Values set to zero if the count is less than 5
+
+cat1_freq_comp$`20/21 Episodes`[cat1_freq_comp$`20/21 Episodes` < 5] <- "<5" #Values set to zero if the count is less than 5
+
+colnames(cat1_freq_comp) <- c("Category 1 Description", "19/20 Episodes", "20/21 Episodes", "Percentage change")
+
+cat1_freq_comp <- cat1_freq_comp %>% filter(!(`Category 1 Description` == "Other diseases caused by chlamydiae" | `Category 1 Description` == "Pregnancy with abortive outcome" | `Category 1 Description` == "Viral hepatitis" | `Category 1 Description` == "Persons encountering health services in circumstances related to reproduction")) #removes category 1 descriptions considered sensitive
+
+```
+
+```{r group8 Identify top 10 ICD-10 codes during analysis period, include = FALSE}
+
+Top_10_icd_sql <- paste("SELECT eps.DIAG_CD_123, icd.DESCRIPTION, COUNT (*) FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		LEFT JOIN SAILUKHDV.ICD10_CODES_AND_TITLES_AND_METADATA_",latest_icd_meta_extract," AS icd
+			ON eps.DIAG_CD_123 = icd.ALT_CODE 
+		WHERE eps.DIAG_CD_123 IS NOT NULL
+		AND eps.EPI_END_DT BETWEEN '2019-04-01' AND '",Max_Prev_Date,"'
+		GROUP BY eps.DIAG_CD_123,
+				icd.DESCRIPTION
+				ORDER BY count(*) DESC
+		LIMIT 10;", sep = "")
+
+Top_10_icd <- sqlQuery(channel, Top_10_icd_sql, NUM_OF_EPS)
+
+icd_1 <- Top_10_icd[1,1]
+
+icd_2 <- Top_10_icd[2,1]
+
+icd_3 <- Top_10_icd[3,1]
+
+icd_4 <- Top_10_icd[4,1]
+
+icd_5 <- Top_10_icd[5,1]
+
+icd_6 <- Top_10_icd[6,1]
+
+icd_7 <- Top_10_icd[7,1]
+
+icd_8 <- Top_10_icd[8,1]
+
+icd_9 <- Top_10_icd[9,1]
+
+icd_10 <- Top_10_icd[10,1]
+
+colnames(Top_10_icd) <- c("DIAG_CD_123","Description", "Count of Episodes")
+
+```
+
+```{r group8 import freq data for top 10 ICD-10 codes, include = FALSE}
+
+icd_tops <- NULL
+icd_tops <- c(Top_10_icd[1,1], Top_10_icd[2,1], Top_10_icd[3,1], Top_10_icd[4,1], Top_10_icd[5,1], Top_10_icd[6,1], Top_10_icd[7,1], Top_10_icd[8,1], Top_10_icd[9,1], Top_10_icd[10,1])
+
+icd_rollavg_top = data.frame()
+
+for(icdcode in icd_tops){
+  sql <- paste("SELECT eps.EPI_END_DT, eps.DIAG_CD_123, COUNT(eps.ALF_STS_CD) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		LEFT JOIN SAILUKHDV.ICD10_CODES_AND_TITLES_AND_METADATA_",latest_icd_meta_extract," AS icd
+			ON eps.DIAG_CD_123 = icd.ALT_CODE
+			AND icd.EFFECTIVE_TO IS NULL
+		WHERE eps.DIAG_CD_123 = '",icdcode,"'
+		AND eps.EPI_END_DT >= '",Dates_Start,"'
+		    GROUP BY	eps.EPI_END_DT,
+		          eps.DIAG_CD_123
+		    ORDER BY 	eps.EPI_END_DT,
+		              eps.DIAG_CD_123;",sep ="")
+  icd_sql_run <- sqlQuery(channel, sql)
+  icd_sql_run <- merge(icd_sql_run, Dates_Tab, by = "EPI_END_DT", all = T)
+  icd_sql_run$NUM_OF_EPS[is.na(icd_sql_run$NUM_OF_EPS)] <- 0
+  icd_sql_run$DIAG_CD_123[is.na(icd_sql_run$DIAG_CD_123)] <- icdcode
+  icd_sql_run <- merge(icd_sql_run, Top_10_icd, by = "DIAG_CD_123", all.icd_sql_run = T)
+  icd_sql_run <- icd_sql_run %>% dplyr::mutate("eps_7day_rollavg" = zoo::rollmean(icd_sql_run$NUM_OF_EPS, k=7, fill = NA))
+  name <- paste("icd_top_",icdcode, sep = "_")
+  assign(name, icd_sql_run)
+  icd_rollavg_top <- icd_rollavg_top %>% rbind(icd_sql_run)
+}
+
+#Concatenate chapter number and description
+
+icd_rollavg_top <- icd_rollavg_top %>% mutate(ICD_CODE = paste(icd_rollavg_top$DIAG_CD_123, icd_rollavg_top$Description, sep=" - "))
+
+icd_rollavg_top[is.na(icd_rollavg_top)] <- 0
+
+colnames(Top_10_icd) <- c("3 character ICD-10 code", "Title", "Count of Episodes")
+
+```
+
+```{r group9 rolling average respiratory, include = FALSE}
+
+resp_rollavg_sql <- paste("SELECT eps.EPI_END_DT, COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		LEFT JOIN SAILUKHDV.ICD10_CODES_AND_TITLES_AND_METADATA_",latest_icd_meta_extract," AS icd
+			ON eps.DIAG_CD_1234 = icd.ALT_CODE
+			AND icd.ICD_VERSION = 'ICD10 5th Edition'
+		WHERE eps.DIAG_CD_123 LIKE 'J%'
+			AND icd.CATEGORY_1_CODE IS NOT NULL
+			AND eps.EPI_END_DT >= '",Dates_Start,"'
+		GROUP BY eps.EPI_END_DT
+		ORDER BY eps.EPI_END_DT;", sep = "")
+
+resp_rollavg <- sqlQuery(channel, resp_rollavg_sql)
+
+resp_rollavg <- merge(resp_rollavg,Dates_Tab, by = "EPI_END_DT", all = TRUE)
+
+resp_rollavg$NUM_OF_EPS[is.na(resp_rollavg$NUM_OF_EPS)] <- 0
+
+resp_rollavg <- resp_rollavg %>% dplyr::mutate(diagnostic_code = "Respiratory") # ensures chapter number appears when there are no episodes recorded on a certain date
+
+resp_rollavg <- resp_rollavg %>% dplyr::mutate(eps_7day_rollavg = zoo::rollmean(NUM_OF_EPS, k=7, fill = NA)) #added 7 day rolling avg
+
+```
+
+```{r group9 rolling average covid, include = FALSE}
+
+covid_rollavg_sql <- paste("SELECT eps.EPI_END_DT, COUNT(eps.ALF_STS_CD) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+	WHERE eps.DIAG_CD_123 LIKE 'U07%'
+	AND eps.EPI_END_DT >= '",Dates_Start,"'
+	    GROUP BY	eps.EPI_END_DT
+	    ORDER BY 	eps.EPI_END_DT;", sep = "")
+
+covid_rollavg <- sqlQuery(channel,covid_rollavg_sql)
+
+covid_rollavg <- merge(covid_rollavg, Dates_Tab, by = "EPI_END_DT", all = T)
+
+covid_rollavg$NUM_OF_EPS[is.na(covid_rollavg$NUM_OF_EPS)] <- 0
+
+covid_rollavg <- covid_rollavg %>% dplyr::mutate(diagnostic_code = "COVID-19") # ensures chapter number appears when there are no episodes recorded on a certain date
+
+covid_rollavg <- covid_rollavg %>% dplyr::mutate(eps_7day_rollavg = zoo::rollmean(NUM_OF_EPS, k=7, fill = NA)) #added 7 day rolling avg
+
+```
+
+```{r group9 rolling avg respiratory and covid, include = FALSE}
+
+respcovtot_rollavg_sql <- paste("SELECT eps.EPI_END_DT, COUNT(eps.ALF_STS_CD) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE (eps.DIAG_CD_123 LIKE '%J%'
+		OR eps.DIAG_CD_123 LIKE 'U07%')
+		AND eps.EPI_END_DT >= '",Dates_Start,"'
+		    GROUP BY	eps.EPI_END_DT
+		    ORDER BY 	eps.EPI_END_DT;", sep = "")
+
+respcovtot_rollavg <- sqlQuery(channel,respcovtot_rollavg_sql)
+
+respcovtot_rollavg <- merge(respcovtot_rollavg, Dates_Tab, by = "EPI_END_DT", all = T)
+
+respcovtot_rollavg$NUM_OF_EPS[is.na(respcovtot_rollavg$NUM_OF_EPS)] <- 0
+
+respcovtot_rollavg <- respcovtot_rollavg %>% dplyr::mutate(diagnostic_code = "Total")
+
+respcovtot_rollavg <- respcovtot_rollavg %>% dplyr::mutate(eps_7day_rollavg = zoo::rollmean(NUM_OF_EPS, k=7, fill = NA)) #added 7 day rolling avg
+
+```
+
+```{r group9 combine respiratory and covid avgs into single table, include = FALSE}
+
+respcov_rollavg <- covid_rollavg %>% rbind(resp_rollavg)
+
+```
+
+```{r respiratoy episodes long term trend, include = FALSE}
+
+resp_long_rollavg_sql <- paste("SELECT eps.EPI_END_DT,
+		COUNT(eps.ALF_STS_CD) AS NUM_OF_EPS
+	FROM SAILWWMC_V.VB_PEDW_EPS_2015ON AS eps
+		INNER JOIN SAILUKHDV.ICD10_CODES_AND_TITLES_AND_METADATA_",latest_icd_meta_extract," AS icd
+				ON eps.DIAG_CD_1234 = icd.ALT_CODE
+			WHERE (eps.EPI_END_DT < '2016-04-01' AND icd.ICD_VERSION = 'ICD10 4th Edition')
+		AND icd.CATEGORY_1_CODE LIKE 'J%'		
+			OR (eps.EPI_END_DT >= '2016-04-01' AND icd.ICD_VERSION = 'ICD10 5th Edition')
+		AND icd.CATEGORY_1_CODE LIKE 'J%'
+		AND eps.EPI_END_DT <= '",Max_New_Date,"'
+		GROUP BY eps.EPI_END_DT
+		ORDER BY eps.EPI_END_DT;", sep = "")
+
+resp_long_rollavg <- sqlQuery(channel, resp_long_rollavg_sql)
+
+resp_long_rollavg <- resp_long_rollavg %>% dplyr::mutate(eps_7day_rollavg = zoo::rollmean(NUM_OF_EPS, k=7, fill = NA)) #added 7 day rolling avg
+
+```
+
+
+```{r group10 average diagnoses per episode, include = FALSE}
+
+avg_diags_sql <- paste("SELECT MQO.EPI_END_DT, AVG(CAST(MQO.NUM_OF_DIAG AS DECIMAL(5,1))) AS AVG_DIAGS_PER_EP
+FROM (SELECT eps.EPI_END_DT,
+		eps.EPI_ID,
+		count(diag.DIAG_CD_123) AS NUM_OF_DIAG
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+    LEFT JOIN SAIL0572V.PEDW_DIAG_",ltst_extract," AS diag
+			ON eps.EPI_ID = diag.PROV_UNIT_CD||diag.SPELL_NUM_PE||diag.EPI_NUM
+	GROUP BY eps.EPI_END_DT,
+			eps.EPI_ID) AS MQO
+	WHERE MQO.EPI_END_DT BETWEEN '2019-04-01' AND '",end_of_curr_mt,"'
+	GROUP BY MQO.EPI_END_DT
+	ORDER BY MQO.EPI_END_DT;", sep = "")
+
+avg_diags <- sqlQuery(channel, avg_diags_sql)
+
+avg_diags <- avg_diags %>% dplyr::mutate(eps_7day_rollavg = zoo::rollmean(AVG_DIAGS_PER_EP, k=7, fill = NA)) #added 7 day rolling avg
+
+```
+
+```{r group11 import OPCS-4 chapter table data, include = FALSE}
+
+opcs_chap_tab_sql <- paste("SELECT opcs.OPCS4_CHAPTER, opcs.OPCS4_CHAPTER_DESCRIPTION
+	FROM SAILUKHDV.OPCS4_OPCS4_CHAPTER_",latest_opcs_meta_extract," AS opcs
+		ORDER BY opcs.OPCS4_CHAPTER;", sep = "")
+
+opcs_chap_tab <- sqlQuery(channel,opcs_chap_tab_sql)
+
+colnames(opcs_chap_tab) <- c("OPER_INIT", "Description")
+
+```
+
+```{r group11 rolling average by opcs-4 code, include = FALSE}
+
+OPCS_Codes <- c("A", "B", "C", "D", "E", "F", "G", "H", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Z") #There is no Chapter I and chapter Y excluded because it has no data
+
+opcs_rollavg_all = data.frame()
+
+for(opcscode in OPCS_Codes){
+  sql <- paste("SELECT eps.EPI_END_DT, COUNT(eps.ALF_STS_CD) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.OPER_INIT = '",opcscode,"'
+		AND eps. EPI_END_DT >= '",Dates_Start,"'
+		    GROUP BY	eps.EPI_END_DT
+		    ORDER BY 	eps.EPI_END_DT;", sep = "")
+  sql_run <- sqlQuery(channel, sql)
+  sql_run <- merge(sql_run, Dates_Tab, by = "EPI_END_DT", all = T)
+  sql_run$NUM_OF_EPS[is.na(sql_run$NUM_OF_EPS)] <- 0
+  sql_run <- sql_run %>% dplyr::mutate(OPER_INIT = opcscode)
+  sql_run <- sql_run %>% dplyr::mutate("eps_7day_rollavg" = zoo::rollmean(sql_run$NUM_OF_EPS, k=7, fill = NA))
+  sql_run$OPER_INIT[is.na(sql_run$OPER_INIT)] <- opcscode
+  name <- paste("opcs_rollavg",opcscode, sep = "_")
+  assign(name, sql_run)
+  opcs_rollavg_all <- opcs_rollavg_all %>% rbind(sql_run)
+}
+
+
+opcs_rollavg_all[is.na(opcs_rollavg_all)] <- 0
+
+#Add ICD Chapter description
+
+opcs_rollavg_all <- merge(opcs_rollavg_all, opcs_chap_tab, by = "OPER_INIT")
+
+#Concatenate chapter number and description
+
+opcs_rollavg_all <- opcs_rollavg_all %>% mutate(OPCS_CODE = paste(opcs_rollavg_all$OPER_INIT, opcs_rollavg_all$Description, sep=" - "))
+
+```
+
+```{r group11 rolling average by opcs-4 code adjusted y axis, include = FALSE}
+
+OPCS_Codes <- c("A", "C", "E", "G", "H", "K", "L", "M", "O", "Q", "R", "S", "T", "U", "W", "X") #There is no Chapter I and chapter Y excluded because it has no data
+#Following chapters removed due to small numbers: B, D, F, J, N, P, V, Z
+
+opcs_rollavg_all_adjy = data.frame()
+
+for(opcscode in OPCS_Codes){
+  sql <- paste("SELECT eps.EPI_END_DT, COUNT(eps.ALF_STS_CD) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.OPER_INIT = '",opcscode,"'
+		AND eps. EPI_END_DT >= '",Dates_Start,"'
+		    GROUP BY	eps.EPI_END_DT
+		    ORDER BY 	eps.EPI_END_DT;", sep = "")
+  sql_run <- sqlQuery(channel, sql)
+  sql_run <- merge(sql_run, Dates_Tab, by = "EPI_END_DT", all = T)
+  sql_run$NUM_OF_EPS[is.na(sql_run$NUM_OF_EPS)] <- 0
+  sql_run <- sql_run %>% dplyr::mutate(OPER_INIT = opcscode)
+  sql_run <- sql_run %>% dplyr::mutate("eps_7day_rollavg" = zoo::rollmean(sql_run$NUM_OF_EPS, k=7, fill = NA))
+  sql_run$OPER_INIT[is.na(sql_run$OPER_INIT)] <- opcscode
+  name <- paste("opcs_rollavg",opcscode, sep = "_")
+  assign(name, sql_run)
+  opcs_rollavg_all_adjy <- opcs_rollavg_all_adjy %>% rbind(sql_run)
+}
+
+
+opcs_rollavg_all_adjy[is.na(opcs_rollavg_all_adjy)] <- 0
+
+#Add ICD Chapter description
+
+opcs_rollavg_all_adjy <- merge(opcs_rollavg_all_adjy, opcs_chap_tab, by = "OPER_INIT")
+
+#Concatenate chapter number and description
+
+opcs_rollavg_all_adjy <- opcs_rollavg_all_adjy %>% mutate(OPCS_CODE = paste(opcs_rollavg_all_adjy$OPER_INIT, opcs_rollavg_all_adjy$Description, sep=" - "))
+
+```
+
+```{r group11 import frequency table episodes by opcs-4 init by month, include = FALSE}
+
+oper_init_freq <- sqlQuery(channel, "SELECT	eps.EPI_END_YR,
+		substring(char(eps.EPI_END_DT),1,7) AS EPI_YR_MT,
+		eps.OPER_INIT,
+		COUNT(eps.SPELL_NUM_PE) AS NUM_OF_EPS
+ 	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+ 		GROUP BY	eps.EPI_END_YR,
+					substring(char(eps.EPI_END_DT),1,7),
+		      eps.OPER_INIT
+			ORDER BY	substring(char(eps.EPI_END_DT),1,7),
+						eps.OPER_INIT;")
+
+```
+
+```{r group11 Apr-Dec 2019 avg monthly eps by opcs-4 Chapter, include = FALSE}
+
+oper_init_freq_2019 <- oper_init_freq %>% filter(EPI_YR_MT %in% c('2019-04', '2019-05', '2019-06', '2019-07', '2019-08', '2019-09', '2019-10', '2019-11', '2019-12')) #filtered subset for relevant months
+
+oper_init_mean_2019 <- setNames(aggregate(oper_init_freq_2019[,4], list(oper_init_freq_2019$OPER_INIT), mean), c("OPCS-4 Chapter","2019 Mean Eps")) # calculate prov mean for relevant months, and assign column names
+
+oper_init_freq_2020 <- oper_init_freq %>% filter(EPI_YR_MT %in% c('2020-04', '2020-05', '2020-06', '2020-07', '2020-08', '2020-09', '2020-10', '2020-11', '2020-12'))
+
+oper_init_mean_2020 <- setNames(aggregate(oper_init_freq_2020[,4], list(oper_init_freq_2020$OPER_INIT), mean), c("OPCS-4 Chapter", "2020 Mean Eps"))
+
+oper_init_mean_comp <- merge(oper_init_mean_2019, oper_init_mean_2020, by = "OPCS-4 Chapter", all = T) # combine provider means into a single table, all = T ensures that added or removed chapters still appear in the table
+
+opcs_chap_tab2 <- opcs_chap_tab
+
+colnames(opcs_chap_tab2) <- c("OPCS-4 Chapter", "OPCS_CHAPTER_DESCRIPTION")
+
+oper_init_mean_comp <- merge(oper_init_mean_comp, opcs_chap_tab2, by="OPCS-4 Chapter")
+
+oper_init_mean_comp <- oper_init_mean_comp %>% filter(`OPCS-4 Chapter` != "#") #Excludes Chapter 22 from the calculation due to having only 1 episode in 2019
+
+```
+
+```{r group11 calculate opcs-4 Chapter percentage change, include = FALSE}
+
+oper_init_mean_comp <- oper_init_mean_comp %>% mutate(Perc_dif = (oper_init_mean_comp[,3] - oper_init_mean_comp[,2])/oper_init_mean_comp[,2]) # accuracy 2L rounds to nearest integer %
+
+oper_init_mean_comp <- oper_init_mean_comp %>% arrange(desc(Perc_dif))
+
+colnames(oper_init_mean_comp) <- c("OPCS-4 Chapter", "2019 mean eps.", "2020 mean eps.", "Chapter description", "Percentage change")
+
+oper_init_dif_min <- min(oper_init_mean_comp$`Percentage change`, na.rm = TRUE) # obtain min percentage difference
+
+oper_dif_min <- which.min(abs(oper_init_mean_comp$`Percentage change`)) #pre to following argument
+
+oper_init_dif_min <- label_percent(accuracy = 1L)(oper_init_dif_min) #format as a percentage
+
+oper_dif_min <- print(oper_dif_min <- oper_init_mean_comp[`oper_dif_min`,1], max.levels = 0) #obtain chapter number with max percentage difference
+
+oper_dif_min_desc <- opcs_chap_tab %>% filter(OPER_INIT == oper_dif_min)
+
+oper_dif_min_desc <- oper_dif_min_desc[1,2]
+
+oper_init_dif_max <- max(oper_init_mean_comp$`Percentage change`, na.rm = TRUE) #obtain max percentage difference
+
+oper_dif_max <- which.max(abs(oper_init_mean_comp$`Percentage change`)) #pre to following argument
+
+oper_init_dif_max <- label_percent(accuracy = 1L)(oper_init_dif_max) #format as a percentage
+
+oper_dif_max <- print(oper_dif_max <- oper_init_mean_comp[`oper_dif_max`,1], max.levels = 0) #obtain chapter number with max percentage difference
+
+oper_dif_max_desc <- opcs_chap_tab %>% filter(OPER_INIT == oper_dif_max)
+
+oper_dif_max_desc <- oper_dif_max_desc[1,2]
+
+oper_init_mean_comp$`Percentage change` <- label_percent(accuracy = 1L)(oper_init_mean_comp$`Percentage change`) #change format to percentage
+
+oper_big_dif <- sum(oper_init_mean_comp$`Percentage change` > -50, na.rm = TRUE)
+
+```
+
+```{r group11a OPCS codelag import data, include = FALSE}
+
+opcs_codelag = data.frame()
+
+for(idate in Extract_dates){
+  sql <- paste("SELECT eps.EPI_END_DT, eps.FIRST_OPCS_DT, count(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+	  WHERE eps.EPI_END_DT >= '",latest_extract_M6,"'
+		AND eps.FIRST_OPCS_DT = '",idate,"'
+	    GROUP BY	eps.EPI_END_DT,
+	    			eps.FIRST_OPCS_DT 
+	    ORDER BY 	eps.EPI_END_DT,
+	    			eps.FIRST_OPCS_DT;", sep = "")
+  sql_run <- sqlQuery(channel, sql)
+  sql_run <- merge(sql_run, Dates_Tab2, by = "EPI_END_DT", all = T)
+  sql_run$NUM_OF_EPS[is.na(sql_run$NUM_OF_EPS)] <- 0
+  sql_run <- sql_run %>% dplyr::mutate("7day_rollavg" = zoo::rollmean(sql_run$NUM_OF_EPS, k=7, fill = NA))
+  sql_run$FIRST_OPCS_DT[is.na(sql_run$FIRST_OPCS_DT)] <- idate
+  name <- paste("opcs_codelag",idate, sep = "_")
+  assign(name, sql_run)
+  opcs_codelag <- opcs_codelag %>% rbind(sql_run)
+}
+
+opcs_codelag[is.na(opcs_codelag)] <- 0
+
+opcs_codelag_all <- merge(opcs_codelag, eps_rollavg, by = "EPI_END_DT", all.x = T)
+
+opcs_codelag_all <- opcs_codelag_all %>% mutate(Percent_Coded =opcs_codelag_all$`7day_rollavg`/eps_7day_rollavg)
+
+opcs_codelag_all[is.na(opcs_codelag_all)] <- 0
+
+```
+
+```{r group11a average opcs coded percenatage 2020, include = FALSE}
+
+opcs_uncoded_eps_2020 <- sqlQuery(channel, "SELECT COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT BETWEEN '2020-01-01' AND '2020-12-31'
+			AND eps.OPER_CD IS NULL
+		GROUP BY eps.EPI_END_YR;")
+
+opcs_avg_coded_2020 <- 1-(opcs_uncoded_eps_2020/total_eps_2020)
+
+```
+
+```{r group11a average opcs coded percentage 2019, include = FALSE}
+
+#calculates the average percentage of episodes opcs coded between January and December 2019 
+
+opcs_uncoded_eps_2019 <- sqlQuery(channel, "SELECT COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT BETWEEN '2019-01-01' AND '2019-12-31'
+			AND eps.OPER_CD IS NULL
+		GROUP BY eps.EPI_END_YR;")
+
+opcs_avg_coded_2019 <- 1-(opcs_uncoded_eps_2019/total_eps_2019)
+
+```
+
+```{r group11b import data for coding lag freq per opcs chapter, warning=FALSE, include=FALSE}
+
+OPCS_Codes <- c("A", "B", "C", "D", "E", "F", "G", "H", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Z") #There is no Chapter I and chapter Y excluded because it has no data
+
+codelag_opcs_all = data.frame()
+
+for(idate in Extract_dates){
+  for(opcscode in OPCS_Codes){
+  sql <- paste("SELECT eps.EPI_END_DT, eps.FIRST_OPCS_DT, count(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+	  WHERE eps.EPI_END_DT >= '",latest_extract_M6,"'
+		AND eps.FIRST_OPCS_DT = '",idate,"'
+		AND eps.OPER_INIT = '",opcscode,"'
+	    GROUP BY	eps.EPI_END_DT,
+	    			eps.FIRST_OPCS_DT
+	    ORDER BY 	eps.EPI_END_DT,
+	    			eps.FIRST_OPCS_DT;", sep = "")
+  sql_run <- sqlQuery(channel, sql)
+  sql_run <- merge(sql_run, Dates_Tab2, by = "EPI_END_DT", all = T)
+  sql_run$NUM_OF_EPS[is.na(sql_run$NUM_OF_EPS)] <- 0
+  sql_run <- sql_run %>% dplyr::mutate("7day_rollavg" = zoo::rollmean(sql_run$NUM_OF_EPS, k=7, fill = NA))
+  sql_run$FIRST_OPCS_DT[is.na(sql_run$FIRST_OPCS_DT)] <- idate
+  sql_run <- sql_run %>% dplyr::mutate("OPER_INIT" = opcscode)
+  name <- paste("codelag_opcs",idate, sep = "_")
+  assign(name, sql_run)
+  codelag_opcs_all <- codelag_opcs_all %>% rbind(sql_run)
+}
+}
+
+codelag_opcs_all[is.na(codelag_opcs_all)] <- 0
+
+codelag_opcs_all <- merge(codelag_opcs_all, opcs_chap_tab, by = "OPER_INIT")
+
+#Concatenate OPCS code and description
+
+codelag_opcs_all <- codelag_opcs_all %>% mutate(OPCS_CODE = paste(codelag_opcs_all$OPER_INIT, codelag_opcs_all$Description, sep=" - "))
+
+```
+
+```{r group11b import data for coding lag freq per opcs chapter adjusted y-axis, warning=FALSE, include=FALSE}
+
+OPCS_Codes <- c("A", "C", "E", "G", "H", "K", "L", "M", "O", "Q", "R", "S", "T", "U", "W", "X") #There is no Chapter I and chapter Y excluded because it has no data
+#Following chapters removed due to small numbers: B, D, F, J, N, P, V, Z
+
+codelag_opcs_all_adjy = data.frame()
+
+for(idate in Extract_dates){
+  for(opcscode in OPCS_Codes){
+  sql <- paste("SELECT eps.EPI_END_DT, eps.FIRST_OPCS_DT, count(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+	  WHERE eps.EPI_END_DT >= '",latest_extract_M6,"'
+		AND eps.FIRST_OPCS_DT = '",idate,"'
+		AND eps.OPER_INIT = '",opcscode,"'
+	    GROUP BY	eps.EPI_END_DT,
+	    			eps.FIRST_OPCS_DT
+	    ORDER BY 	eps.EPI_END_DT,
+	    			eps.FIRST_OPCS_DT;", sep = "")
+  sql_run <- sqlQuery(channel, sql)
+  sql_run <- merge(sql_run, Dates_Tab2, by = "EPI_END_DT", all = T)
+  sql_run$NUM_OF_EPS[is.na(sql_run$NUM_OF_EPS)] <- 0
+  sql_run <- sql_run %>% dplyr::mutate("7day_rollavg" = zoo::rollmean(sql_run$NUM_OF_EPS, k=7, fill = NA))
+  sql_run$FIRST_OPCS_DT[is.na(sql_run$FIRST_OPCS_DT)] <- idate
+  sql_run <- sql_run %>% dplyr::mutate("OPER_INIT" = opcscode)
+  name <- paste("codelag_opcs",idate, sep = "_")
+  assign(name, sql_run)
+  codelag_opcs_all_adjy <- codelag_opcs_all_adjy %>% rbind(sql_run)
+}
+}
+
+codelag_opcs_all_adjy[is.na(codelag_opcs_all_adjy)] <- 0
+
+codelag_opcs_all_adjy <- merge(codelag_opcs_all_adjy, opcs_chap_tab, by = "OPER_INIT")
+
+#Concatenate OPCS code and description
+
+codelag_opcs_all_adjy <- codelag_opcs_all_adjy %>% mutate(OPCS_CODE = paste(codelag_opcs_all_adjy$OPER_INIT, codelag_opcs_all_adjy$Description, sep=" - "))
+
+```
+
+```{r group4 primary opcs code changes since previous PEDW, include =FALSE}
+
+OPCS_Code_Change <- sqlQuery(channel, "SELECT	peps.ALF_PE,
+		eps.OPER_CD AS OPER_CD_NEW,
+ 		peps.OPER_CD AS OPER_CD_PREV,
+    substring(char(peps.EPI_END_DT),1,7) AS EPI_YR_MT,
+    peps.EPI_END_DT
+     	FROM SAILW0572V.VB_PEDW_EPS_2015ON_PREV AS peps
+ 		LEFT JOIN SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+ 			ON eps.EPI_ID = peps.EPI_ID
+ 			WHERE eps.EPI_ID IS NOT NULL
+ 			AND (eps.OPER_CD <> peps.OPER_CD
+ 			OR (peps.OPER_CD IS NULL
+ 				AND eps.OPER_CD IS NOT NULL)
+ 			OR (eps.OPER_CD IS NULL
+ 				AND peps.OPER_CD IS NOT NULL));")
+
+# Obtain the total number of episodes with code changes, including from null to an entry and vice versa, as well as the min #and max episode end dates for changes episodes.
+
+OPCS_Tot_Changes_Codes <- nrow(OPCS_Code_Change)
+
+OPCS_Min_Code_Change_Dt <- min(OPCS_Code_Change$EPI_END_DT)
+
+OPCS_Min_Code_Change_Dt_Form <- strftime(OPCS_Min_Code_Change_Dt, format("%B %Y"))
+
+OPCS_Max_Code_Change_Dt <- max(OPCS_Code_Change$EPI_END_DT)
+
+OPCS_Max_Code_Change_Dt_Form <- strftime(OPCS_Max_Code_Change_Dt, format("%B %Y"))
+
+OPCS_Code_Match <- sqlQuery(channel, "SELECT	peps.ALF_PE,
+		eps.OPER_CD AS OPER_CD_NEW,
+ 		peps.OPER_CD AS OPER_CD_PREV,
+    substring(char(peps.EPI_END_DT),1,7) AS EPI_YR_MT,
+    peps.EPI_END_DT
+     	FROM SAILW0572V.VB_PEDW_EPS_2015ON_PREV AS peps
+ 		LEFT JOIN SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+ 			ON peps.EPI_ID = eps.EPI_ID
+ 			WHERE peps.OPER_CD = eps.OPER_CD;")
+
+OPCS_Null <- sqlQuery(channel, "SELECT	peps.ALF_PE,
+		eps.OPER_CD AS OPER_CD_NEW,
+ 		peps.OPER_CD AS OPER_CD_PREV,
+    substring(char(peps.EPI_END_DT),1,7) AS EPI_YR_MT,
+    peps.EPI_END_DT
+     	FROM SAILW0572V.VB_PEDW_EPS_2015ON_PREV AS peps
+ 		LEFT JOIN SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+ 			ON peps.EPI_ID = eps.EPI_ID
+ 			WHERE peps.OPER_CD IS NULL
+ 				AND eps.OPER_CD IS NULL;")
+
+epi_removed <- sqlQuery(channel, "SELECT	peps.ALF_PE,
+		eps.OPER_CD AS OPER_CD_NEW,
+ 		peps.OPER_CD AS OPER_CD_PREV,
+    substring(char(peps.EPI_END_DT),1,7) AS EPI_YR_MT,
+    peps.EPI_END_DT
+      FROM SAILW0572V.VB_PEDW_EPS_2015ON_PREV AS peps
+	LEFT JOIN SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		ON peps.EPI_ID = eps.EPI_ID
+		WHERE eps.EPI_ID IS NULL;")
+
+```
+
+```{r group11c 50% opcs-4 coded data import, include = FALSE}
+
+opcs_uncoded_eps <- sqlQuery(channel, "SELECT eps.EPI_END_DT, COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT > '2020-03-31'
+			AND eps.OPER_CD IS NULL
+		GROUP BY eps.EPI_END_DT
+	  ORDER BY eps.EPI_END_DT;")
+
+opcs_uncoded_eps <- opcs_uncoded_eps %>% dplyr::mutate(`7day_rollavg` = zoo::rollmean(NUM_OF_EPS, k=7, fill = NA)) #added 7 day rolling avg
+
+opcs_uncoded_eps <- opcs_uncoded_eps %>% dplyr::mutate(coding_status = "Uncoded")
+
+opcs_coded_eps <- sqlQuery(channel, "SELECT eps.EPI_END_DT, COUNT(eps.ALF_PE) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		WHERE eps.EPI_END_DT > '2020-03-31'
+			AND eps.OPER_CD IS NOT NULL
+		GROUP BY eps.EPI_END_DT
+	  ORDER BY eps.EPI_END_DT;")
+
+opcs_coded_eps <- opcs_coded_eps %>% dplyr::mutate(`7day_rollavg` = zoo::rollmean(NUM_OF_EPS, k=7, fill = NA)) #added 7 day rolling avg
+
+opcs_coded_eps <- opcs_coded_eps %>% dplyr::mutate(coding_status = "Coded")
+
+opcs_coding_confidence <- opcs_coded_eps %>% rbind(opcs_uncoded_eps)
+  
+```
+
+```{r group12 Identify top 10 opcs-4 codes during analysis period, include = FALSE}
+
+Top_10_opcs_sql <- paste("SELECT eps.OPER_CD_123, opcs.TITLE
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		LEFT JOIN SAILUKHDV.OPCS4_CODES_AND_TITLES_",latest_opcs_meta_extract," AS opcs
+			ON eps.OPER_CD_123 = opcs.CODE_WITHOUT_DECIMAL
+		WHERE eps.OPER_CD_123 IS NOT NULL
+		AND opcs.OPCS_VERSION = '4.9'
+		GROUP BY eps.OPER_CD_123,
+				opcs.TITLE
+				ORDER BY count(*) DESC
+		LIMIT 10;", sep = "")
+
+Top_10_opcs <- sqlQuery(channel,Top_10_opcs_sql)
+
+Top_10_opcs$OPER_CD_123 <- trimws(Top_10_opcs$OPER_CD_123)
+
+opcs_1 <- Top_10_opcs[1,1]
+
+opcs_1_title <- Top_10_opcs[1,2]
+
+opcs_2 <- Top_10_opcs[2,1]
+
+opcs_2_title <- Top_10_opcs[2,2]
+
+opcs_3 <- Top_10_opcs[3,1]
+
+opcs_3_title <- Top_10_opcs[3,2]
+
+opcs_4 <- Top_10_opcs[4,1]
+
+opcs_4_title <- Top_10_opcs[4,2]
+
+opcs_5 <- Top_10_opcs[5,1]
+
+opcs_5_title <- Top_10_opcs[5,2]
+
+opcs_6 <- Top_10_opcs[6,1]
+
+opcs_6_title <- Top_10_opcs[6,2]
+
+opcs_7 <- Top_10_opcs[7,1]
+
+opcs_7_title <- Top_10_opcs[7,2]
+
+opcs_8 <- Top_10_opcs[8,1]
+
+opcs_8_title <- Top_10_opcs[8,2]
+
+opcs_9 <- Top_10_opcs[9,1]
+
+opcs_9_title <- Top_10_opcs[9,2]
+
+opcs_10 <- Top_10_opcs[10,1]
+
+opcs_10_title <- Top_10_opcs[10,2]
+
+```
+
+```{r group12 import freq data for top 10 opcs-4 codes, include = FALSE}
+
+opcs_tops <- NULL
+opcs_tops <- c(Top_10_opcs[1,1], Top_10_opcs[2,1], Top_10_opcs[3,1], Top_10_opcs[4,1], Top_10_opcs[5,1], Top_10_opcs[6,1], Top_10_opcs[7,1], Top_10_opcs[8,1], Top_10_opcs[9,1], Top_10_opcs[10,1])
+
+opcs_rollavg_top = data.frame()
+
+for(opcscode in opcs_tops){
+  sql <- paste("SELECT eps.EPI_END_DT, eps.OPER_CD_123, COUNT(eps.ALF_STS_CD) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+			LEFT JOIN SAILUKHDV.OPCS4_CODES_AND_TITLES_",latest_opcs_meta_extract," AS opcs
+			  ON eps.OPER_CD_123 = opcs.CODE_WITHOUT_DECIMAL
+		      AND eps.OPER_CD_123 IS NOT NULL
+		WHERE eps.OPER_CD_123 = '",opcscode,"'
+		AND eps.EPI_END_DT >= '",Dates_Start,"'
+		AND opcs.OPCS_VERSION = '4.9'
+		    GROUP BY	eps.EPI_END_DT,
+		          eps.OPER_CD_123
+		    ORDER BY 	eps.EPI_END_DT,
+		              eps.OPER_CD_123;",sep ="")
+  sql_run <- sqlQuery(channel, sql)
+  sql_run <- merge(sql_run, Dates_Tab, by = "EPI_END_DT", all = T)
+  sql_run$NUM_OF_EPS[is.na(sql_run$NUM_OF_EPS)] <- 0
+  sql_run$OPER_CD_123[is.na(sql_run$OPER_CD_123)] <- opcscode
+  sql_run <- merge(sql_run, Top_10_opcs, by = "OPER_CD_123", all.sql_run = T)
+  sql_run <- sql_run %>% dplyr::mutate("eps_7day_rollavg" = zoo::rollmean(sql_run$NUM_OF_EPS, k=7, fill = NA))
+  name <- paste("opcs_top_",opcscode, sep = "_")
+  assign(name, sql_run)
+  opcs_rollavg_top <- opcs_rollavg_top %>% rbind(sql_run)
+}
+
+#Concatenate opcs 3 digit code and description
+
+opcs_rollavg_top <- opcs_rollavg_top %>% mutate("Description" = paste(opcs_rollavg_top$OPER_CD_123, opcs_rollavg_top$TITLE, sep=" - "))
+
+opcs_rollavg_top[is.na(opcs_rollavg_top)] <- 0
+
+colnames(Top_10_opcs) <- c("3 character OPCS code", "Title")
+
+```
+
+```{r group15 import data for admission type rolling average, include = FALSE}
+
+admis_rolling_elect_sql <- paste("SELECT eps.EPI_END_DT, admis.ADMIS_GROUP, COUNT(eps.ALF_STS_CD) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		LEFT JOIN SAILW0572V.VB_ADMIS_MTHD_GROUPINGS AS admis
+			ON eps.ADMIS_MTHD_CD = admis.ADMIS_MTHD_CD
+			WHERE admis.ADMIS_GROUP = 'Elective Admission Episodes'
+			AND eps.EPI_END_DT >= '",Dates_Start,"'
+	    GROUP BY	eps.EPI_END_DT,
+	              	admis.ADMIS_GROUP
+	    ORDER BY 	eps.EPI_END_DT;", sep = "")
+
+admis_rolling_elect <- sqlQuery(channel, admis_rolling_elect_sql)
+
+admis_rolling_elect <- merge(admis_rolling_elect, Dates_Tab, by = "EPI_END_DT", all = T)
+
+admis_rolling_elect$NUM_OF_EPS[is.na(admis_rolling_elect$NUM_OF_EPS)] <- 0
+
+admis_rolling_elect <- admis_rolling_elect %>% dplyr::mutate(eps_7day_rollavg = zoo::rollmean(NUM_OF_EPS, k=7, fill = NA))
+
+admis_rolling_emerg_sql <- paste("SELECT eps.EPI_END_DT, admis.ADMIS_GROUP, COUNT(eps.ALF_STS_CD) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		LEFT JOIN SAILW0572V.VB_ADMIS_MTHD_GROUPINGS AS admis
+			ON eps.ADMIS_MTHD_CD = admis.ADMIS_MTHD_CD
+			WHERE admis.ADMIS_GROUP = 'Emergency Admission Episodes'
+			AND eps.EPI_END_DT >= '",Dates_Start,"'
+	    GROUP BY	eps.EPI_END_DT,
+	              	admis.ADMIS_GROUP
+	    ORDER BY 	eps.EPI_END_DT;", sep = "")
+
+admis_rolling_emerg <- sqlQuery(channel, admis_rolling_emerg_sql)
+
+admis_rolling_emerg <- merge(admis_rolling_emerg, Dates_Tab, by = "EPI_END_DT", all = T)
+
+admis_rolling_emerg$NUM_OF_EPS[is.na(admis_rolling_emerg$NUM_OF_EPS)] <- 0
+
+admis_rolling_emerg <- admis_rolling_emerg %>% dplyr::mutate(eps_7day_rollavg = zoo::rollmean(NUM_OF_EPS, k=7, fill = NA))
+
+admis_rolling_other_sql <- paste("SELECT eps.EPI_END_DT, admis.ADMIS_GROUP, COUNT(eps.ALF_STS_CD) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		LEFT JOIN SAILW0572V.VB_ADMIS_MTHD_GROUPINGS AS admis
+			ON eps.ADMIS_MTHD_CD = admis.ADMIS_MTHD_CD
+			WHERE admis.ADMIS_GROUP = 'Other Admission Episodes Including Maternity'
+			AND eps.EPI_END_DT >= '",Dates_Start,"'
+	    GROUP BY	eps.EPI_END_DT,
+	              	admis.ADMIS_GROUP
+	    ORDER BY 	eps.EPI_END_DT;", sep = "")
+
+admis_rolling_other <- sqlQuery(channel, admis_rolling_other_sql)
+
+admis_rolling_other <- merge(admis_rolling_other, Dates_Tab, by = "EPI_END_DT", all = T)
+
+admis_rolling_other$NUM_OF_EPS[is.na(admis_rolling_other$NUM_OF_EPS)] <- 0
+
+admis_rolling_other <- admis_rolling_other %>% dplyr::mutate(eps_7day_rollavg = zoo::rollmean(NUM_OF_EPS, k=7, fill = NA))
+
+```
+
+```{r group15 combine admissions avgs into single table, include = FALSE}
+
+admis_rolling <- admis_rolling_elect %>% rbind(admis_rolling_emerg, admis_rolling_other)
+
+```
+
+```{r group15 Apr-Nov 2019 avg monthly eps by admission type, include = FALSE}
+
+admis_freq <- sqlQuery(channel, "SELECT	substring(char(eps.EPI_END_DT),1,7) AS EPI_YR_MT,
+		admis.ADMIS_GROUP,
+		COUNT(eps.ALF_STS_CD) AS NUM_OF_EPS
+	FROM SAILW0572V.VB_PEDW_EPS_2015ON AS eps
+		LEFT JOIN SAILW0572V.VB_ADMIS_MTHD_GROUPINGS AS admis
+			ON eps.ADMIS_MTHD_CD = admis.ADMIS_MTHD_CD
+	    GROUP BY	substring(char(eps.EPI_END_DT),1,7),
+	              	admis.ADMIS_GROUP
+	    ORDER BY	substring(char(eps.EPI_END_DT),1,7),
+	              	admis.ADMIS_GROUP;")
+
+admis_freq_2019 <- admis_freq %>% filter(EPI_YR_MT %in% c('2019-04', '2019-05', '2019-06', '2019-07', '2019-08', '2019-09', '2019-10', '2019-11', '2019-12', '2020-01', '2020-02', '2020-03')) #filtered subset for relevant months
+
+admis_mean_2019 <- setNames(aggregate(admis_freq_2019[,3], list(admis_freq_2019$ADMIS_GROUP), mean), c("Admission Group","19/20 Mean Eps")) # calculate admission mean for relevant months, and assign column names
+
+admis_freq_2020 <- admis_freq %>% filter(EPI_YR_MT %in% c('2020-04', '2020-05', '2020-06', '2020-07', '2020-08', '2020-09', '2020-10','2020-11', '2020-12', '2021-01', '2021-02', '2021-03'))
+
+admis_mean_2020 <- setNames(aggregate(admis_freq_2020[,3], list(admis_freq_2020$ADMIS_GROUP), mean), c("Admission Group", "20/21 Mean Eps"))
+
+admis_mean_comp <- merge(admis_mean_2019, admis_mean_2020, by = "Admission Group", all = T) # combine admission means into a single table, all = T ensures that added or removed chapters still appear in the table
+
+```
+
+```{r admis type percentage change, include=FALSE}
+
+admis_mean_comp <- admis_mean_comp %>% mutate(Perc_dif = scales::percent((admis_mean_comp[,3] - admis_mean_comp[,2])/admis_mean_comp[,2], accuracy = 1L)) # accuracy 2L rounds to nearest integer %
+
+colnames(admis_mean_comp) <- c("Admission group", "19/20 mean eps.", "20/21 mean eps.","Percentage change")
+
+```
+
+```{r group17 ALF status codes, include = FALSE}
+
+ALF_STATUS <- sqlQuery(channel,"SELECT as2.ALF_STS_CD, as2.ALF_STS_DESC FROM SAILREFRV.ALF_STS as2;")
+
+ALF_STATUS$ALF_STS_CD <- as.numeric(ALF_STATUS$ALF_STS_CD)
+
+ALF_STATUS <- ALF_STATUS %>% arrange(ALF_STS_CD)
+
+```
+
+## Aims
+
+This report investigates the clinical coding of records within the SAIL hospital admissions dataset (PEDW), by comparing records prior to, and post COVID-19.  The purpose is to understand what impact, if any, COVID-19 has had on clinical coding, as well as any impact data lag will have upon analysis of PEDW data and resultant findings.
+
+The following two hypotheses were investigated using ICD-10 and OPCS-4 codes within the PEDW data
+
+- Whether all clinical coding has declined since the COVID-19 outbreak
+- Whether clinical coding has declined in only certain coding Chapters
+
+Unless otherwise specified, references to episodes includes all episodes, regardless of their coding status.  Where a distinction is made the following definitions are used throughout the report:
+
+- Coded episodes: episodes with a valid primary ICD-10 code recorded within the PEDW episodes dataset
+- Uncoded episodes: episodes where the primary ICD-10 code is null within the PEDW episodes dataset
+
+## Key Output Summary
+
+- The number of episodes recorded in PEDW has reduced following the COVID-19 outbreak, with the lowest rolling average number of episodes occurring on `r min_eps_date`
+
+- From March 2020, the number of episodes recorded has reduced in comparison to the previous monthly averages.  Prior to April 2020 the monthly average number of episodes was `r format(pre_covid_avg,big.mark = ",")` which has reduced to a monthly average of `r format( post_covid_avg,big.mark = ",")` from April 2020 to `r curr_mt_char`.
+
+- `r format(Total_Lag,big.mark = ",")` episodes were added to PEDW retrospectively since the `r previous_data_extract` data extract
+
+- The proportion of uncoded episodes increased from `r pre_covid_noICD_avg` of recorded episodes prior to April 2020, to `r post_covid_noICD_avg` from April 2020 onwards.  However, this is heavily skewed by a low coding rate in the latest months, excluding the latest six months results in a post-Covid average of `r post_covid_noICD_avg_excltst`, which is less than the pre-covid average.
+
+- Since April 2019 only `r Perc_Spells_w_Other` of uncoded episodes had another coded episode within the same spell
+
+- `r format(Tot_Changes_Codes,big.mark = ",")` episodes had a change to their ICD-10 diagnosis code since the previous report,  `r Perc_Six_MT` of which had an episode end date within six months of the previous report end date (`r format(Max_Prev_Date, "%d %b %Y")`)
+
+- ICD-10 Chapter `r chapter_dif_max` (`r chapter_dif_max_desc`) showed the greatest percentage difference in the number of episodes recorded and Chapter `r chapter_dif_min` (`r chapter_dif_min_desc`) showed the least variation
+
+- OPCS-4 Chapter `r oper_dif_max` (`r oper_dif_max_desc`) showed the greatest percentage change in the number of episodes recorded in 2020 compared to 2019 and Chapter `r oper_dif_min` (`r oper_dif_min_desc`) showed the least change
+
+- Elective episodes saw a more than 50% reduction between April and December 2020, compared to the same period in 2019
+
+## Methods and data considerations
+
+PEDW data extracts used for this report are taken on a monthly basis.  This report uses the following data reports and tables:
+
+* SAIL0572V.PEDW_EPISODE_`r ltst_extract`
+* SAIL0572V.PEDW_SPELL_`r ltst_extract`
+* SAIL0572V.PEDW_DIAG_`r ltst_extract`
+* SAIL0572V.PEDW_OPER_`r ltst_extract`
+* SAIL0572V.ADDE_DEATHS_`r latest_adde_extract`
+
+* SAILUKHDV.ICD10_CODES_AND_TITLES_AND_METADATA_`r latest_icd_meta_extract` (linked to version 5)
+* SAILUKHDV.OPCS4_CODES_AND_TITLES_`r latest_opcs_meta_extract` (linked to version 4.9)
+
+* SAIL concept library Sensitive ICD-10 codes
+* SAIL concept library Sensitive OPCS-4 codes
+
+The starting point for analysis was the PEDW episodes data for episodes with an end date from April 2016. Episode counts quoted in this report are row counts from the PEDW episodes extract. It should be noted that a single hospital spell may contain multiple episodes with different primary diagnosis and operational coding.
+
+Where counts are fewer than 5, the values are suppressed to prevent possible disclosure.
+
+Summary of data exclusions:
+
+* Episodes where data linkage was not sufficiently robust (anonymised linking field status threshold 1, 4 or 39 was not met, see appendix 9 for matching status definitions)
+* Episodes with a sensitive diagnosis or operational procedure codes as defined within the SAIL disclosure rules.
+* Episodes where the care provider was not one of the seven Welsh Health Boards or Velindre NHS Trust
+* Episodes where the ADDE Deaths record indicated a date of death prior to the episode start date
+
+Unfinished episodes are not included in the main dataset for analysis because the records are incomplete.  In total there were `r format(Tot_Unfin_Eps, big.mark = ",")` unfinished episodes, with the earliest from `r  format(First_Unfin_Ep, big.mark = ",")`. Further information is available in Appendix 4.
+
+```{r group1 print consort, echo = FALSE, fig.cap = "**Figure 1.** CONSORT diagram for episodes included in the analysis"}
+
+p
+
+```
+
+## Background
+
+According to the BMA (2020), in "order to free up enough capacity to deal with the initial peak of the pandemic, the NHS was forced to shut down or significantly reduce many areas of non-COVID-19 care during April, May and June 2020.  This, combined with fewer patients seeking care during lockdown, means that there has been a significant drop in elective procedures, urgent cancer referral, first cancer treatments and outpatient appointments."  This will impact not only the overall number of episodes recorded, but also very likely the nature of those episodes, as elective procedures are likely to have been more heavily impacted than urgent A&E care.
+
+In addition to the changes in the nature of the procedures provided by the NHS since the start of the COVID-19 pandemic, there are further complications due to changes in the clinical coding standards which have needed to rapidly adapt in order to measure the pandemic.  This has not only resulted in the addition of several new codes, but has also changed the standards for assigning primary codes.
+
+COVID-19 codes were not made available until 26th March 2020, however it is known that there were cases in the UK prior to this date.  There was a requirement for the cases to be retrospectively coded but it is not possible to know how completely this was carried out.
+
+Between the introduction of the COVID-19 codes in late March and 30th June 2020, all episodes which included COVID-19 were required to have COVID-19 recorded as their primary diagnosis.  From 1st July 2020, this process was changed to COVID-19 being recorded as the secondary diagnosis, unless it was in fact the primary, as detailed by HSCIC (2021).  Any analysis investigating only primary ICD10 codes is therefore likely to be significantly impacted by the standards changes, not only when investigating COVID-19, but also other diagnoses where COVID-19 was present during the episode.
+
+An added complicating factor is that the Welsh Government has recently removed the target of 95% completion for clinical codes. This may have further reduced the completion rates for clinical coding.  Despite this change, it is likely that coding relating to COVID-19 episodes will have remained high due to the public interest.  This may skew the picture when comparing COVID-19 episodes against others, as it is not known whether some codes are being prioritised over others.
+
+## Findings
+
+### Rolling average episodes
+
+In `r Max_Perc_Change_MT` the number of episodes recorded reduced by `r Max_Perc_Change` from a previous monthly average of `r format(Max_Perc_Change_Pre, big.mark = ",")` to `r format(Max_Perc_Change_Post, big.mark = ",")` being recording in the month.  There has since been a recovery in episode numbers, although not to pre COVID-19 levels.
+
+The rolling seven day trend of all episodes shows that there was a sharp reduction in episodes recorded in March, with the lowest rolling average number of episodes occurring on `r min_eps_date`. The pre-covid daily average was `r format(pre_covid_day_avg, big.mark = ",")` which has since reduced to `r format(post_covid_day_avg, big.mark = ",")`.
+
+```{r group1a rollavg eps graph, fig.width = 6, fig.height = 4, echo = FALSE, warning=FALSE, fig.cap = "**Figure 2.** PEDW episodes recorded per day based on a seven day rolling average"}
+
+ggplot(data = eps_rollavg, aes(x = EPI_END_DT, y = eps_7day_rollavg))+ 
+     geom_area(group = 1, fill = "#332288", alpha = 0.4)+
+     geom_line()+
+     theme_minimal()+
+     theme(axis.text.x = element_text(angle = 90), strip.background = element_rect(fill = 'gray88'))+ #strip controls the header
+     scale_x_date(breaks = date_breaks("months"), labels = date_format('%b %Y'), expand = c(0,0))+
+    ggtitle("PEDW episodes (7 day rolling average)")+
+     xlab("Episode End Date")+
+     ylab("Number of Episodes")+
+    ylim(0,4000)
+
+```
+
+In January and February 2020, the number of episodes recorded in PEDW was higher than the previous monthly average recorded between 2016 and 2019.  However, from March 2020 onwards, the number of episodes recorded reduced to much lower levels than the previous averages, with April showing the greatest reduction (see Table 1).
+
+```{r group1b average episodes per month comparison, echo=FALSE, fig.width=8, fig.height=4  ,fig.cap= "**Figure 3.** Average episodes per month 2016-2019, compared with episodes recorded in 2020"}
+
+ggplot(data= Avg_Eps_Per_MT_comp,aes(x=EPI_END_MT, y=NUM_OF_EPS, fill = Period))+
+  geom_bar(stat="identity", position = "dodge", alpha = 0.7)+
+  scale_fill_manual(values = Colour_table$Colour)+
+  theme_minimal()+
+  theme(panel.border = element_rect(colour = "slategrey", fill = NA))+
+  xlab("Episode End Month")+
+  ylab("Number of Episodes")+
+  ggtitle("Count of episodes 2016-2019 avg compared to 2020 and 2021")
+
+```
+
+```{r group1b percentage change of episode numbers, echo = FALSE}
+
+kbl(Avg_Eps_Per_MT_perc, caption = "Table 1: Average episodes recorded, 2020 comparison to monthly averages 2016-2019", digits = 0) %>% kable_styling(bootstrap_options = "striped", full_width = F, position = "left", font_size = 12)
+
+```
+
+### Newly added episodes from April 2019
+
+The latest audit into clinical coding, Cracking the Code, Management of Clinical Coding Across Wales (Sep 2020), identifies any episodes not coded within a month as backlog. The report identified over 181,000 backlogged finished consultant episodes (FCEs) from April 2017 to May 2020.
+
+Between the `r previous_data_extract` PEDW data extract and `r latest_data_extract` data extract, there were `r format(Total_New_Eps,big.mark = ",")` new episodes, with episode end dates ranging from `r Min_Date_Form` to `r Max_Date_Form`.  The majority of these episodes are for the latest month.  However, there were `r format(Total_Lag,big.mark = ",")` episodes entered retrospectively since the `r previous_data_extract` data extract, with the majority of backdated episodes ending in `r Max_New_Eps_Date`.
+
+Figure 4 shows all backdated episodes newly added in the latest PEDW Episodes report which have episode end dates prior to the end of the previous report.  Note that any values fewer than five are reduced to zero to prevent possible disclosure.
+
+```{r group3 plot number of new episodes per month, echo=FALSE, warning=FALSE, fig.width = 8, fig.height = 4, fig.cap= "**Figure 4.** Backdated episodes added to PEDW since previous report end date"}
+
+ggplot(data= New_Eps_Red,aes(x=EPI_YR_MT, y = frequency))+
+     geom_col(fill = "#332288", alpha = 0.7)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90), panel.border = element_rect(colour = "slategrey", fill = NA))+
+    ggtitle("Episodes added to PEDW since previous report\nby month of episode end")+
+     xlab("Year and Month of Episode")+
+     ylab("Number of New Episodes")+
+    expand_limits(y = c(1,4500))+
+  scale_x_continuous(breaks = as.numeric(New_Eps_Red$EPI_YR_MT), labels = format(New_Eps_Red$EPI_YR_MT, "%b %Y"), expand = c(0,0))+
+    geom_text(aes(label = frequency), size = 3, vjust = 0.2, angle = 90, hjust = -0.3)
+
+```
+
+The mean lag length was `r Lag_Mean` days, calculated as the average days between the recorded episode end date and the end date of the previous report.
+
+A large number of episodes were retrospectively added within the Cwm Taf Local Health Board in the March 2021 PEDW data extract, covering the period up to March 2019.  No large backdating of episodes was seen during the most recent data extract.
+
+```{r group3 plot rolling average new episodes, echo=FALSE, warning=FALSE, fig.width=6, fig.height=4, fig.cap="**Figure 5.** Backdated episodes added to PEDW in six months prior to previous report end (7 day rolling average)"}
+
+ggplot(data = New_Eps_Rollavg, aes(x = EPI_END_DT, y = eps_7day_rollavg))+ 
+     geom_area(group = 1, fill = "#332288", alpha = 0.4)+
+     geom_line()+
+     theme_minimal()+
+     theme(axis.text.x = element_text(angle = 90), strip.background = element_rect(fill = 'gray88'))+ #strip controls the header
+    ggtitle("Backdated Episodes (7 day rolling avgerage)")+
+     xlab("Episode End Date")+
+     ylab("Number of Episodes")+
+    scale_x_date(date_labels ="%b %y",date_breaks = "1 month", expand = c(0,0)) #Adjusts the x axis ticks to include more
+
+```
+The below chart shows the number of episodes ending on a given day.  The area shading indicates the first data extract in which the episode was recorded in PEDW.
+
+```{r group3a stacked area plot rolling average episodes by date added, echo=FALSE, warning=FALSE, fig.width=7, fig.height=5, fig.cap="**Figure 6.** Episodes by date added to PEDW (7 day rolling average)"}
+
+ggplot(data = datalag, mapping = aes(x = EPI_END_DT, y = `7day_rollavg`, fill = factor(FIRST_REPORT_DT))) +
+  geom_area(position = position_stack(reverse = TRUE), alpha = 0.6)+
+    scale_fill_manual(values = c("#882255","#ddcc77","#44aa99","#332288", "#88CCEE", "#CC6677"))+
+   geom_vline(aes(xintercept = as.Date(Extract_date1), linetype = Extract_date1), colour = "#882255", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date2), linetype = Extract_date2), colour = "#ddcc77", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date3), linetype = Extract_date3),colour = "#44aa99", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date4), linetype = Extract_date4), colour = "#332288", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date5), linetype = Extract_date5), colour = "#88CCEE", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date6), linetype = Extract_date6), colour = "#CC6677", size = 1)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90), panel.border = element_rect(colour = "slategrey", fill = NA), legend.position = "bottom", legend.text = element_text(size=8), legend.title = element_text(size=8),plot.title = element_text(size=11))+
+     ggtitle("Episodes by date added to PEDW (7 day rolling average)")+
+     xlab("Episode End Date")+
+     ylab("Number of Episodes")+
+    labs(fill = "Date of report\nepisode code\nfirst added")+
+  scale_x_date(breaks = date_breaks("months"), labels = date_format('%b %Y'))+
+  scale_linetype_manual(name = 'Data\nextraction\ndate', values = c("dashed", "dashed", "dashed", "dashed", "dashed", "dashed"), guide = guide_legend(override.aes = list(colour = c("#882255", "#ddcc77", "#44aa99", "#332288", "#88CCEE", "#CC6677")), nrow=3, byrow=TRUE))+
+    guides(fill = guide_legend(override.aes = list(alpha = 0.6),nrow=3, byrow=TRUE)) #applies alpha to the legend
+
+```
+
+### Uncoded Episodes
+
+```{r group2 backlog by year chart, echo= FALSE, fig.width = 6, fig.height = 4, fig.cap = "**Figure 7.** Uncoded episodes per year"}
+
+ggplot(data= backlog,aes(x=EPI_END_YR,y=NUMBER_OF_EPISODES))+
+  geom_col(fill = "#332288", alpha = 0.7)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90), panel.border = element_rect(colour = "slategrey", fill = NA))+
+  xlab("Episode End Year")+
+  ylab("Number of Episodes")+
+  ggtitle("Uncoded episodes per year")+
+  scale_x_continuous(breaks = seq(2010,2021,1))+
+  geom_text(aes(label = NUMBER_OF_EPISODES), size = 3, vjust = -0.3) #label function adds data labels with vjust used to adjust the height
+  
+```
+
+There are `r format(eps_no_diag,big.mark = ",")` uncoded episodes with end dates from April 2019 onwards, distributed across `r format(spells_no_diag,big.mark = ",")` spells.  Of these, only `r format(eps_diag_other,big.mark = ",")` spells (`r Perc_Spells_w_Other`) had another coded episode within the same spell.
+
+```{r group5 plot total episodes per month, echo = FALSE, fig.width= 6, fig.height=4, fig.cap= "**Figure 8.** Uncoded episodes by month of episode end"}
+
+ggplot(data = icd_null_freq, mapping= aes(x = EPI_YR_MT, y = NUM_OF_EPS))+
+  geom_col(fill = "#332288", alpha = 0.7)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90), panel.border = element_rect(colour = "slategrey", fill = NA))+
+  scale_y_continuous(labels = scales :: comma) + # prevents scientific notation
+  ggtitle("Uncoded episodes in PEDW by month of episode end")+
+  xlab("Year and Month of Episode End")+
+  ylab("Number of Episodes")+
+  scale_x_continuous(breaks = as.numeric(icd_null_freq$EPI_YR_MT), labels = format(icd_null_freq$EPI_YR_MT, "%b %Y"), expand = c(0,0)) # converts the axis ticks to date format and ensures all are plotted
+
+```
+
+```{r group5 plot ICD-10 null as a percentage of all eps, echo = FALSE, fig.width = 6, fig.height = 4, fig.cap= "**Figure 9.** Uncoded episodes as a percentage of all episodes"}
+
+ggplot(data = perc_icd_null, mapping= aes(x = EPI_YR_MT, y = PERC_NULL))+
+  geom_col(fill = "#332288", alpha = 0.7)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90), panel.border = element_rect(colour = "slategrey", fill = NA))+
+  ggtitle("Percentage of all episodes per month in PEDW\nwhich are uncoded")+
+  xlab("Year and Month of Episode End")+
+  ylab("Percentage of episodes uncoded")+
+  scale_y_continuous(limits = c(0,100))+
+  scale_x_continuous(breaks = as.numeric(icd_null_freq$EPI_YR_MT), labels = format(icd_null_freq$EPI_YR_MT, "%b %Y"), expand = c(0,0)) # converts the axis ticks to date format and ensures all are plotted
+
+```
+
+There is a much higher number of uncoded episodes in recent months which is likely due to datalag.
+
+```{r group5 average uncoded episodes per month comparison, echo=FALSE, fig.width= 8, fig.height=4, fig.cap= "**Figure 10.** Episodes with null ICD-10 code, 2016-2019 average compared to 2020 actual"}
+
+ggplot(data= Avg_ICDNULL_Per_MT_comp,aes(x=EPI_END_MT, y=NUM_OF_EPS, fill = Period))+
+  geom_bar(stat="identity", position = "dodge", alpha = 0.7)+
+  scale_fill_manual(values = Colour_table$Colour)+
+  theme_minimal()+
+  theme(panel.border = element_rect(colour = "slategrey", fill = NA))+
+  xlab("Episode End Month")+
+  ylab("Number of Episodes")+
+  ggtitle("Count of uncoded episodes 2016-2019 avg compared to 2020 and 2021")
+
+```
+
+Due to the high number of uncoded episodes in recent months, the below chart excludes recent months to provide a clearer picture of the difference excluding the biggest impact from datalag.
+
+Since August 2020 the number of uncoded episodes has been consistently higher than the previous monthly averages.
+
+```{r group5 average uncoded episodes per month exc 2021 comparison, echo=FALSE, fig.width= 8, fig.height=4, fig.cap= "**Figure 11.** Episodes with null ICD-10 code, 2016-2019 average compared to 2020 actual"}
+
+ggplot(data= Avg_ICDNULL_exc21_comp,aes(x=EPI_END_MT, y=NUM_OF_EPS, fill = Period))+
+  geom_bar(stat="identity", position = "dodge", alpha = 0.7)+
+  scale_fill_manual(values = Colour_table$Colour)+
+  theme_minimal()+
+  theme(panel.border = element_rect(colour = "slategrey", fill = NA))+
+  xlab("Episode End Month")+
+  ylab("Number of Episodes")+
+  ggtitle("Count of uncoded episodes 2016-2019 avg compared to 2020")
+
+```
+
+```{r group5 percentage change uncoded episodes, echo = FALSE}
+
+kbl(Avg_ICDNULL_Per_MT_perc, caption = "**Table 2:** Average uncoded episodes recorded, 2020 comparison to monthly averages 2016-2019", digits = 0) %>% kable_styling(bootstrap_options = "striped", full_width = F, position = "left", font_size = 12)
+
+```
+
+As there has been a change in the number of episodes recorded in PEDW following COVID-19, the below plot illustrates the proportion of uncoded episodes per month.
+
+This shows that the proportion of episodes with no ICD-10 code recorded has been consistently higher each month of 2020 than the previous monthly averages.
+
+```{r group5 proportion of uncoded episodes, echo= FALSE, fig.width=8, fig.height=4, fig.cap="**Figure 12.** Proportion of uncoded episodes"}
+
+ggplot(data= Prop_Null_ICD_comp,aes(x=`Episode End Month`, y=`proportion`, fill = Period))+
+  geom_bar(stat="identity", position = "dodge", alpha = 0.7)+
+  scale_fill_manual(values = Colour_table$Colour)+
+  scale_y_continuous(labels = scales::percent)+
+  theme_minimal()+
+  theme(panel.border = element_rect(colour = "slategrey", fill = NA))+
+  xlab("Episode End Month")+
+  ylab("Percentage of uncoded episodes")+
+  ggtitle("Percentage of uncoded episodes 2016-2019 avg compared to 2020 and 2021")
+
+```
+Due to the high proportion of uncoded episodes in recent months, the below chart excludes recent months to provide a clearer picture of the percentage difference excluding the biggest impact from datalag.
+
+```{r group5 proportion of uncoded episodes exc 21, echo= FALSE, fig.width=8, fig.height=4, fig.cap="**Figure 13.** Proportion of uncoded episodes"}
+
+ggplot(data= Prop_Null_ICD_comp_exc21,aes(x=`Episode End Month`, y=`proportion`, fill = Period))+
+  geom_bar(stat="identity", position = "dodge", alpha = 0.7)+
+  scale_fill_manual(values = Colour_table$Colour)+
+  scale_y_continuous(labels = scales::percent)+
+  theme_minimal()+
+  theme(panel.border = element_rect(colour = "slategrey", fill = NA))+
+  xlab("Episode End Month")+
+  ylab("Percentage of uncoded episodes")+
+  ggtitle("Percentage of uncoded episodes 2016-2019 avg compared to 2020")
+
+```
+
+```{r group5a coding confidence stacked area plot rolling average, echo=FALSE, warning=FALSE, fig.width=8, fig.height=4, fig.cap="**Figure 14.** Episodes by coding completion (7 day rolling average)"}
+
+ggplot(data = coding_confidence, mapping = aes(x = EPI_END_DT, y = `7day_rollavg`, fill = factor(coding_status))) +
+  geom_area(position = position_fill(reverse=TRUE), alpha = 0.6)+
+    scale_fill_manual(values = c("#332288","#44aa99"))+
+      geom_hline(yintercept = avg_coded_2020[1,1], colour = "#000000", linetype = 2, size = 1)+
+      geom_text(aes(x=as.Date('2021-01-20'), y=avg_coded_2020[1,1], label= "2020 avg % coded"), vjust=-1, colour= "#000000", size= 3)+
+  theme(axis.text.x = element_text(angle = 90), panel.border = element_rect(colour = "slategrey", fill = NA))+
+     ggtitle("Episodes by ICD-10 coding completion (7 day rolling average)")+
+     xlab("Episode End Date")+
+     ylab("Percentage of Episodes Coded")+
+    labs(fill = "Coding status")+
+  scale_x_date(breaks = date_breaks("1 months"), labels = date_format('%b-%Y'))+
+  scale_y_continuous(labels = scales::percent, n.breaks = 10)+
+    guides(fill = guide_legend(override.aes = list(alpha = 0.6), reverse = TRUE)) #applies alpha to the legend
+
+```
+The below chart shows the number of coded episodes ending on a given day.  The area shading indicates the first data extract in which an ICD-10 code was recorded.
+
+```{r group3b plot rolling average diag codes by date added, fig.width=7, fig.height=5, echo=FALSE, warning=FALSE, fig.cap="**Figure 15.** Primary diagnosis codes (ICD-10) by date added to PEDW \n (7 day rolling average)"}
+
+ggplot(data = codelag, mapping = aes(x = EPI_END_DT, y = `7day_rollavg`, fill = factor(FIRST_ICD_DT))) + 
+  geom_area(position = position_stack(reverse = TRUE), alpha = 0.6)+
+    scale_fill_manual(values = c("#882255","#ddcc77","#44aa99","#332288", "#88CCEE", "#CC6677"))+
+    geom_vline(aes(xintercept = as.Date(Extract_date1), linetype = Extract_date1), colour = "#882255", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date2), linetype = Extract_date2), colour = "#ddcc77", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date3), linetype = Extract_date3),colour = "#44aa99", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date4), linetype = Extract_date4), colour = "#332288", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date5), linetype = Extract_date5), colour = "#88CCEE", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date6), linetype = Extract_date6), colour = "#CC6677", size = 1)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90), panel.border = element_rect(colour = "slategrey", fill = NA), legend.position = "bottom", legend.text = element_text(size=8), legend.title = element_text(size=8), plot.title = element_text(size=11))+
+     ggtitle("Coded episodes by date primary diagnosis code added to PEDW\n(7 day rolling average)")+
+     xlab("Episode End Date")+
+     ylab("Number of Episodes")+
+    scale_x_date(date_labels = "%d %b %y", breaks = breaks_pretty(n = 20))+
+    labs(fill = "Date diagnosis\ncode first\nrecorded")+
+  scale_linetype_manual(name = 'Data\nextraction\ndate', values = c("dashed", "dashed", "dashed", "dashed", "dashed", "dashed"), guide = guide_legend(override.aes = list(colour = c("#882255", "#ddcc77", "#44aa99", "#332288", "#88CCEE", "#CC6677")), nrow=3, byrow=TRUE))+
+    guides(fill = guide_legend(override.aes = list(alpha = 0.6), nrow=3, byrow=TRUE)) #applies alpha to the legend
+
+```
+
+The below chart shows the percentage of all episodes ending on a given day which had an ICD-10 code recorded.  The area shading indicates the first data extract in which an ICD-10 coding was recorded.
+
+```{r group3b plot rolling average percentage coded by date added, fig.width=7, fig.height=5, echo=FALSE, warning=FALSE, fig.cap="**Figure 16.** Percentage of coded episodes by date added to PEDW \n (7 day rolling average)"}
+
+ggplot(data = codelag_all, mapping = aes(x = EPI_END_DT, y = Percent_Coded, fill = factor(FIRST_ICD_DT))) +
+  geom_area(position = position_stack(reverse = TRUE), alpha = 0.6)+
+    scale_fill_manual(values = c("#882255","#ddcc77","#44aa99","#332288", "#88CCEE", "#CC6677"))+
+    geom_vline(aes(xintercept = as.Date(Extract_date1), linetype = Extract_date1), colour = "#882255", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date2), linetype = Extract_date2), colour = "#ddcc77", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date3), linetype = Extract_date3),colour = "#44aa99", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date4), linetype = Extract_date4), colour = "#332288", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date5), linetype = Extract_date5), colour = "#88CCEE", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date6), linetype = Extract_date6), colour = "#CC6677", size = 1)+
+      geom_hline(yintercept = avg_coded_2020[1,1], colour = "#000000", linetype = 2, size = 1)+
+      geom_text(aes(x=as.Date('2021-04-20'), y=avg_coded_2020[1,1], label= "2020 avg % coded"), vjust=1.2, colour= "#000000", size= 3)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90), panel.border = element_rect(colour = "slategrey", fill = NA), legend.position = "bottom", legend.text = element_text(size=8), legend.title = element_text(size=8), plot.title = element_text(size=11))+
+     ggtitle("Percentage of ICD-10 coded episodes by date primary diagnosis code added to\nPEDW (7 day rolling average)")+
+     xlab("Episode End Date")+
+     ylab("Percentage of Episodes Coded")+
+    scale_y_continuous(labels = scales::percent, breaks = breaks_pretty(), limits = c(0,1))+
+    scale_x_date(date_labels = "%d %b %y", breaks = date_breaks("1 month"))+
+    labs(fill = "Data extraction\ndate diagnosis\ncode recorded")+
+  scale_linetype_manual(name = 'Data\nextraction\ndate', values = c("dashed", "dashed", "dashed", "dashed", "dashed", "dashed"), guide = guide_legend(override.aes = list(colour = c("#882255", "#ddcc77", "#44aa99", "#332288", "#88CCEE", "#CC6677")), nrow=3, byrow=TRUE))+
+    guides(fill = guide_legend(override.aes = list(alpha = 0.6), nrow=3, byrow=TRUE)) #applies alpha to the legend
+
+```
+
+### Changes in primary ICD-10 diagnosis codes
+
+Another form of data lag may occur when an episode has been recorded, but the diagnosis code has not been completed (uncoded episode) or the diagnosis code is subsequently updated.
+
+In addition to the new episodes added to PEDW, there were `r format(Tot_Changes_Codes,big.mark = ",")` episodes where the primary diagnosis code had been added or updated since the `r previous_data_extract` PEDW data extract.  The end dates for the revised episodes ranged from `r Min_Code_Change_Dt_Form` to `r Max_Code_Change_Dt_Form`.
+
+```{r group4 plot code changes by date, echo = FALSE, fig.width=6, fig.height=4, fig.cap="**Figure 17.** ICD-10 code changes since previous report end date by month of episode end"}
+
+ggplot(data = Code_Change_By_Month, mapping = aes(x = EPI_YR_MT, y = frequency)) +
+  geom_col(fill = "#332288", alpha = 0.7)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90), panel.border = element_rect(colour = "slategrey", fill = NA))+
+     ggtitle("Changes to ICD-10 diagnosis codes since previous report")+
+     xlab("Episode End Date")+
+     ylab("Percentage of episodes")+
+    scale_x_continuous(breaks = as.numeric(Code_Change_By_Month$EPI_YR_MT), labels = format(Code_Change_By_Month$EPI_YR_MT, "%b %Y"), expand = c(0,0))+ # converts the axis ticks to date format and ensures all are plotted
+    geom_text(aes(label = frequency), size = 3, vjust = -0.3)
+
+```
+
+Of the `r format(Tot_Changes_Codes,big.mark = ",")` episodes which had a change to their primary ICD-10 diagnosis code since the previous report `r Perc_Six_MT` ended within six months of the previous report.
+
+The below chart illustrates this as a proportion of all episodes in PEDW
+
+```{r group4 plot ICD-10 changes as a percentage of all eps, echo = FALSE, fig.width = 8, fig.height = 4, fig.cap= "**Figure 11.** ICD-10 code changes as a percentage of all episodes"}
+
+ggplot(data = All_icd_Eps2, mapping = aes(x = EPI_YR_MT, y = count, fill = ICD_CODE_STS)) +
+  geom_col(position = "fill", alpha = 0.7)+
+  scale_fill_manual(values = c("#882255","#ddcc77","#44aa99","#332288"))+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90), panel.border = element_rect(colour = "slategrey", fill = NA))+
+     ggtitle("Changes to ICD-10 Diagnosis Codes since previous report")+
+    xlab("Episode End Date")+
+     ylab("Number of Episodes with Updated Coding")+
+  scale_x_yearmon(breaks = as.yearmon(All_icd_Eps2$EPI_YR_MT))+
+    labs(fill = "ICD-10 code status")+
+    scale_y_continuous(labels = percent)+
+    guides(fill = guide_legend(override.aes = list(alpha = 0.7))) #applies alpha to the legend
+
+```
+
+### ICD-10 Chapter Changes
+
+Chapters 2 (neoplasms), 11 (diseases of the digestive system) and 18 (symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified) had the largest number of episodes with changes to their primary diagnosis codes between the `r previous_data_extract` data extract and the `r latest_data_extract` extract.
+
+The below chord diagram shows all changes in primary ICD-10 codes by Chapter (see Appendix 1 for the ICD-10 Chapter descriptions)
+
+```{r group4a Print Chord Diagram ICD-10 between and within Chapters, echo = FALSE, fig.height=7, fig.width=7, fig.cap="**Figure 19.** Changes between and within ICD-10 Chapters"}
+
+circos.clear()
+
+grid.col = c("1" = "#332288", "2" = "#117733", "3" = "#44AA99", "4" = "#88CCEE", "5" = "#DDCC77", "6" = "#CC6677", "7" = "#AA4499", "8" = "#882255", "9" = "#000000", "10" = "#E69F00", "11" = "#56B4E9", "12" = "#009E73", "13" = "#F0E442", "14" = "#0072B2", "15" = "#D55E00", "16" = "#CC79A7", "17" = "#CC79A7", "18" = "#785EF0", "19" = "#DC267F", "21" = "#FE6100", "22" = "#FFB000")
+
+circos.par(gap.after = c("1" = 3, "2" = 3, "3" = 3, "4" = 3, "5" = 3, "6" = 3, "7" = 3, "8" = 3, "9" = 3, "10" = 3, "11" = 3, "12" = 3, "13" = 3, "14" = 3, "15" = 3, "16" = 3, "17" = 3, "18" = 3, "19" = 3, "21" = 3, "22" = 3))
+
+chordDiagram(Chap_Changes_Diag, order = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "21", "22"), directional = 1, direction.type = c("diffHeight", "arrows"),link.arr.type = "big.arrow", diffHeight = -mm_h(1), grid.col = grid.col)
+
+```
+
+The below chord diagram shows any changes from one ICD-10 Chapter to another (i.e. only when the ICD-10 code was between and not within Chapters).
+
+```{r group4a Print Chord Diagram ICD-10 between Chapters, echo = FALSE, fig.height=7, fig.width=7, fig.cap="**Figure 20.** Changes between ICD-10 Chapters"}
+
+circos.clear()
+
+circos.par(gap.after = c("1" = 3, "2" = 3, "3" = 3, "4" = 3, "5" = 3, "6" = 3, "7" = 3, "8" = 3, "9" = 3, "10" = 3, "11" = 3, "12" = 3, "13" = 3, "14" = 3, "15" = 3, "16" = 3, "17" = 3, "18" = 3, "19" = 3, "21" = 3, "22" = 3))
+
+chordDiagram(Chap_Changes, order = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "21", "22"), directional = 1, direction.type = c("diffHeight", "arrows"),link.arr.type = "big.arrow", diffHeight = -mm_h(1), grid.col = grid.col)
+
+```
+
+### Analysis by ICD-10 Chapter
+
+All Chapters experienced some disruption around April 2020.  However, the amount of disruption and the subsequent recovery varied.
+
+Note that chapters 8 and 17 have been excluded from the below charts prevent disclosure of small numbers.
+
+```{r group6 produce rolling avg icd graphs, fig.width = 7, fig.height = 12, echo = FALSE, warning = FALSE, fig.cap = "**Figure 21.** Episodes recorded by ICD-10 Chapter"}
+
+ggplot(data = transform(icd_rollavg_all, ICD_CODE = factor(ICD_CODE, levels = c("1 - Certain infectious and parasitic diseases", "2 - Neoplasms", "3 - Diseases of the blood and blood-forming organs and certain disorders involving the immune mechanism", "4 - Endocrine, nutritional and metabolic diseases", "5 - Mental and behavioural disorders", "6 - Diseases of the nervous system", "7 - Diseases of the eye and adnexa", "8 - Diseases of the ear and mastoid process", "9 - Diseases of the circulatory system", "10 - Diseases of the respiratory system", "11 - Diseases of the digestive system", "12 - Diseases of the skin and subcutaneous tissue", "13 - Diseases of the musculoskeletal system and connective tissue", "14 - Diseases of the genitourinary system", "15 - Pregnancy, childbirth and the puerperium", "16 - Certain conditions originating in the perinatal period", "17 - Congenital malformations, deformations and chromosomal abnormalities", "18 - Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified", "19 - Injury, poisoning and certain other consequences of external causes", "21 - Factors influencing health status and contact with health services", "22 - Codes for special purposes"))),aes(x = EPI_END_DT, y = eps_7day_rollavg))+ #transform used to sort the graphs in numerical order
+          geom_area(group = 1, fill = "#332288", alpha = 0.4)+
+          geom_line()+
+              facet_wrap(~ICD_CODE, nrow = 7, labeller = labeller(ICD_CODE = label_wrap_gen(45)))+
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 90), strip.background = element_rect(fill = 'gray88'), strip.text = element_text(size = 7))+ #strip controls the header
+          scale_x_date(breaks = date_breaks("2 months"), labels = date_format('%b-%Y'), expand = c(0,0))+ #the expand argument stops the axis from extending past the dates in the dataframe (default value is 0.0.6)
+          ggtitle("Frequency of episodes by ICD-10 Chapter (7 day rolling average)")+
+          xlab("Episode End Date")+
+         ylab("Number of Episodes")
+
+```
+
+```{r group6 produce rolling avg icd graphs free_y, fig.width = 7, fig.height = 12, echo = FALSE, warning = FALSE, fig.cap = "**Figure 22.** Episodes recorded by ICD-10 Chapter with free-y axis"}
+
+ggplot(data = transform(icd_rollavg_all, ICD_CODE = factor(ICD_CODE, levels = c("1 - Certain infectious and parasitic diseases", "2 - Neoplasms", "3 - Diseases of the blood and blood-forming organs and certain disorders involving the immune mechanism", "4 - Endocrine, nutritional and metabolic diseases", "5 - Mental and behavioural disorders", "6 - Diseases of the nervous system", "7 - Diseases of the eye and adnexa", "8 - Diseases of the ear and mastoid process", "9 - Diseases of the circulatory system", "10 - Diseases of the respiratory system", "11 - Diseases of the digestive system", "12 - Diseases of the skin and subcutaneous tissue", "13 - Diseases of the musculoskeletal system and connective tissue", "14 - Diseases of the genitourinary system", "15 - Pregnancy, childbirth and the puerperium", "16 - Certain conditions originating in the perinatal period", "17 - Congenital malformations, deformations and chromosomal abnormalities", "18 - Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified", "19 - Injury, poisoning and certain other consequences of external causes", "21 - Factors influencing health status and contact with health services", "22 - Codes for special purposes"))),aes(x = EPI_END_DT, y = eps_7day_rollavg))+ #transform used to sort the graphs in numerical order
+          geom_area(group = 1, fill = "#332288", alpha = 0.4)+
+          geom_line()+
+          facet_wrap(~ICD_CODE, nrow = 7, labeller = labeller(ICD_CODE = label_wrap_gen(40)),scales = "free_y")+
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 90), strip.background = element_rect(fill = 'gray88'), strip.text = element_text(size = 7))+ #strip controls the header
+          scale_x_date(breaks = date_breaks("2 months"), labels = date_format('%b-%Y'), expand = c(0,0))+ #the expand argument stops the axis from extending past the dates in the dataframe (default value is 0.0.6)
+          ggtitle("Frequency of episodes by ICD-10 Chapter, adjusted y-axis (7 day rolling average)")+
+          xlab("Episode End Date")+
+         ylab("Number of Episodes")
+
+```
+
+```{r group6 Avg episodes recorded Apr-Dec 2019 and 2020 comparison, echo = FALSE}
+
+kbl(chap_mean_comp, caption = "**Table 5:** Average episodes Apr to Nov comparison 2019 to 2020", digits = 0) %>% kable_styling(bootstrap_options = "striped", full_width = F, position = "left", font_size = 12)
+
+```
+
+Chapter 22 has been excluded from the 2020 comparison with previous averages because it reflects the COVID-19 diagnoses so there is no comparable figure prior to 2020.
+
+All Chapters saw a reduction in the number of episodes in 2020 compared to the comparable period in 2019, but the extent of the reduction varied, from `r chap_dif_min` to `r chap_dif_max`.  Chapter `r chapter_dif_max` (`r chapter_dif_max_desc`) showed the greatest reduction compared to the previous year, Chapter `r chapter_dif_min` (`r chapter_dif_min_desc`) showed the least reduction and `r chap_big_dif` Chapters more than halved the number of episodes recorded compared to the previous year.
+
+Chapter 10 (diseases of the respiratory system), is one of the codes with the largest reduction in recorded episodes.  Some of the serious symptoms of COVID-19 include difficulty breathing, shortness of breath and chest pain or pressure (World Health Organisation, 2021), so this change is explored further below.
+
+### Analysis of ICD-10 respiratory codes
+
+Episodes relating to respiratory diagnoses reduced in March at the same time that episodes with a COVID-19 diagnosis increased.
+
+```{r group9 respiratory and covid eps plot, fig.width=8, fig.height= 4, echo = FALSE, warning = FALSE, fig.cap= "**Figure 23.** Frequency of respiratory diagnosis and covid diagnosis codes, 7 day rolling average"}
+
+ggplot(data = respcov_rollavg, aes(x = EPI_END_DT, y = eps_7day_rollavg))+
+    geom_line(size = 1, aes(colour = str_wrap(diagnostic_code, 20)))+ #str_wrap wraps the long text in the legend according to the 20 setting
+    scale_color_manual(values = Colour_table$Colour)+
+    theme_minimal()+
+    theme(axis.text.x = element_text(angle = 90), strip.background = element_rect(fill = 'gray88'), legend.key.height = unit(1,"cm"))+ #strip controls the header
+    scale_x_date(breaks = date_breaks("2 months"), labels = date_format('%b-%Y'), expand = c(0,0))+ #the expand argument stops the axis from extending past the dates in the dataframe (default value is 0.0.6)
+    ggtitle("Frequency of Episodes by COVID-19 or other respiratory grouping \n (7 day rolling average)")+
+    xlab("Episode End Date")+
+    ylab("Number of Episodes")+
+    labs(colour = "Diagnosis Group") #renames the legend title
+
+```
+
+Respiratory episodes tend to show a cyclical pattern, with increased episodes occurring during the winter months.  However, no such increase has yet been seen for winter 20/21.
+
+```{r, respiratory long term rolling average, fig.width = 8, fig.height = 4, warning= FALSE, echo = FALSE, fig.cap="**Figure 24.** Frequency of episodes with a respiratory diagnosis from January 2016"}
+
+ggplot(data = resp_long_rollavg, aes(x = EPI_END_DT, y = eps_7day_rollavg))+ 
+     geom_area(group = 1, fill = "#332288", alpha = 0.4)+
+     geom_line()+
+     theme_minimal()+
+     theme(axis.text.x = element_text(angle = 90), strip.background = element_rect(fill = 'gray88'))+ #strip controls the header
+     scale_x_date(breaks = date_breaks("3 months"), labels = date_format('%b-%Y'), expand = c(0,0))+
+    ggtitle("Respiratory episodes from 2016 onwards (7 day rolling average)")+
+     xlab("Episode End Date")+
+     ylab("Number of episodes")
+
+```
+
+### Coding lag by ICD-10 chapter
+
+The below charts show the number of coded episodes ending on a given day, displayed by ICD-10 Chapter.  The area shading indicates the first data extract in which an ICD-10 coding was recorded.
+
+```{r group6a coding lag by ICD-10 chapter graphs, fig.width=7, fig.height=12, echo= FALSE, warning=FALSE, fig.cap="**Figure 25.** Coding lag by ICD-10 Chapter"}
+
+ggplot(data = transform(codelag_icd_all, ICD_CODE = factor(ICD_CODE, levels = c("1 - Certain infectious and parasitic diseases", "2 - Neoplasms", "3 - Diseases of the blood and blood-forming organs and certain disorders involving the immune mechanism", "4 - Endocrine, nutritional and metabolic diseases", "5 - Mental and behavioural disorders", "6 - Diseases of the nervous system", "7 - Diseases of the eye and adnexa", "8 - Diseases of the ear and mastoid process", "9 - Diseases of the circulatory system", "10 - Diseases of the respiratory system", "11 - Diseases of the digestive system", "12 - Diseases of the skin and subcutaneous tissue", "13 - Diseases of the musculoskeletal system and connective tissue", "14 - Diseases of the genitourinary system", "15 - Pregnancy, childbirth and the puerperium", "16 - Certain conditions originating in the perinatal period", "17 - Congenital malformations, deformations and chromosomal abnormalities", "18 - Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified", "19 - Injury, poisoning and certain other consequences of external causes", "21 - Factors influencing health status and contact with health services", "22 - Codes for special purposes"))), aes(x = EPI_END_DT, y = codelag_icd_all$`7day_rollavg`, fill = factor(FIRST_ICD_DT)))+ 
+  geom_area(position = position_stack(reverse = TRUE), alpha = 0.6)+
+    scale_fill_manual(values = c("#882255","#ddcc77","#44aa99","#332288",  "#88CCEE", "#CC6677"))+
+     geom_vline(aes(xintercept = as.Date(Extract_date1), linetype = Extract_date1), colour = "#882255", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date2), linetype = Extract_date2), colour = "#ddcc77", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date3), linetype = Extract_date3),colour = "#44aa99", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date4), linetype = Extract_date4), colour = "#332288", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date5), linetype = Extract_date5), colour = "#88CCEE", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date6), linetype = Extract_date6), colour = "#CC6677", size = 1)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90), panel.border = element_rect(colour = "slategrey", fill = NA), strip.text = element_text(size=8), legend.position = "bottom", legend.text = element_text(size=8), legend.title = element_text(size=8), plot.title = element_text(size=11))+
+    facet_wrap(~ICD_CODE, nrow = 7, labeller = labeller(ICD_CODE = label_wrap_gen(40)))+
+     ggtitle("Coding lag by ICD-10 chapter")+
+     xlab("Episode End Date")+
+     ylab("Number of Episodes")+
+     scale_x_date(breaks = breaks_pretty(n = 10), labels = date_format('%b-%Y'))+
+    labs(fill = "Data extraction\ndate diagnosis\ncode recorded", size=3)+
+  scale_linetype_manual(name = 'Data\nextraction\ndate', values = c("dashed", "dashed", "dashed", "dashed", "dashed", "dashed"), guide = guide_legend(override.aes = list(colour = c("#882255", "#ddcc77", "#44aa99", "#332288", "#88CCEE", "#CC6677")),nrow=3, byrow=TRUE))+
+    guides(fill = guide_legend(override.aes = list(alpha = 0.6),nrow=3, byrow=TRUE)) #applies alpha to the legend
+
+```
+Note that chapters 8 and 17 have been excluded from the below figures to prevent disclosure of small numbers.
+
+```{r group6a coding lag by ICD-10 chapters free_y, fig.width=7, fig.height=12, echo= FALSE, warning=FALSE, fig.cap="**Figure 26.** Coding lag by ICD-10 Chapter, adjusted y-axis"}
+
+ggplot(data = transform(codelag_icd_all_adjy, ICD_CODE = factor(ICD_CODE, levels = c("1 - Certain infectious and parasitic diseases", "2 - Neoplasms", "3 - Diseases of the blood and blood-forming organs and certain disorders involving the immune mechanism", "4 - Endocrine, nutritional and metabolic diseases", "5 - Mental and behavioural disorders", "6 - Diseases of the nervous system", "7 - Diseases of the eye and adnexa", "9 - Diseases of the circulatory system", "10 - Diseases of the respiratory system", "11 - Diseases of the digestive system", "12 - Diseases of the skin and subcutaneous tissue", "13 - Diseases of the musculoskeletal system and connective tissue", "14 - Diseases of the genitourinary system", "15 - Pregnancy, childbirth and the puerperium", "16 - Certain conditions originating in the perinatal period", "18 - Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified", "19 - Injury, poisoning and certain other consequences of external causes", "21 - Factors influencing health status and contact with health services", "22 - Codes for special purposes"))), mapping = aes(x = EPI_END_DT, y = codelag_icd_all_adjy$`7day_rollavg`, fill = factor(FIRST_ICD_DT)))+ 
+  geom_area(position = position_stack(reverse = TRUE), alpha = 0.6)+
+    scale_fill_manual(values = c("#882255","#ddcc77","#44aa99","#332288",  "#88CCEE", "#CC6677"))+
+   geom_vline(aes(xintercept = as.Date(Extract_date1), linetype = Extract_date1), colour = "#882255", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date2), linetype = Extract_date2), colour = "#ddcc77", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date3), linetype = Extract_date3),colour = "#44aa99", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date4), linetype = Extract_date4), colour = "#332288", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date5), linetype = Extract_date5), colour = "#88CCEE", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date6), linetype = Extract_date6), colour = "#CC6677", size = 1)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90), panel.border = element_rect(colour = "slategrey", fill = NA), strip.text = element_text(size=8), legend.position = "bottom", legend.text = element_text(size=8), legend.title = element_text(size=8), plot.title = element_text(size=11))+
+    facet_wrap(~ICD_CODE, nrow = 7, scales="free_y", labeller = labeller(ICD_CODE = label_wrap_gen(40)))+
+     ggtitle("Coding lag by ICD-10 chapter adjusted y-axis")+
+     xlab("Episode End Date")+
+     ylab("Number of Episodes")+
+     scale_x_date(breaks = breaks_pretty(n = 10), labels = date_format('%b-%Y'))+
+    labs(fill = "Date ICD\ncode first\nrecorded")+
+    scale_linetype_manual(name = 'Data\nextraction\ndate', values = c("dashed", "dashed", "dashed", "dashed", "dashed", "dashed"), guide = guide_legend(override.aes = list(colour = c("#882255", "#ddcc77", "#44aa99", "#332288", "#88CCEE", "#CC6677")),nrow=3, byrow=TRUE))+
+    guides(fill = guide_legend(override.aes = list(alpha = 0.6),nrow=3, byrow=TRUE)) #applies alpha to the legend
+
+```
+
+
+### Average number of diagnoses per episode
+
+The average number of diagnoses recorded per episode has increased since April 2020, but shown a more recent reduction (likely due to data lag).
+
+```{r group10 avg diagnoses graph, fig.width = 6, fig.height = 3, echo = FALSE, warning=FALSE, fig.width=6, fig.height=4, fig.cap= "**Figure 27.** Average number of ICD-10 diagnosis codes recorded per episode"}
+
+ggplot(data = avg_diags, aes(x = EPI_END_DT, y = eps_7day_rollavg))+ 
+     geom_area(group = 1, fill = "#332288", alpha = 0.4)+
+     geom_line()+
+     theme_minimal()+
+     theme(axis.text.x = element_text(angle = 90), strip.background = element_rect(fill = 'gray88'))+ #strip controls the header
+     scale_x_date(breaks = date_breaks("months"), labels = date_format('%b-%Y'), expand = c(0,0))+
+    ggtitle("Average number of ICD-10 diagnosis codes per episode \n (7 day rolling average)")+
+     xlab("Episode End Date")+
+     ylab("Average ICD-10 diagnosis codes\nper episode")
+
+```
+
+### Analysis by OPCS-4 Chapter
+
+```{r group11 produce rolling avg opcs-4 graphs, fig.width = 7, fig.height = 12, echo = FALSE, warning = FALSE, fig.cap = "**Figure 28.** Episodes recorded by OPCS-4 Chapter, 7 day rolling average"}
+
+ggplot(data = opcs_rollavg_all, aes(x = EPI_END_DT, y = eps_7day_rollavg))+ 
+     geom_area(group = 1, fill = "#332288", alpha = 0.4)+
+     geom_line()+
+      facet_wrap(~OPCS_CODE, nrow = 8, labeller = labeller(OPCS_CODE = label_wrap_gen(40)))+
+     theme_minimal()+
+     theme(axis.text.x = element_text(angle = 90), strip.background = element_rect(fill = 'gray88'), strip.text = element_text(size = 7))+ #strip controls the header
+     scale_x_date(breaks = date_breaks("2 months"), labels = date_format('%b-%Y'), expand = c(0,0))+ #the expand argument stops the axis from extending past the dates in the dataframe (default value is 0.0.6)
+     ggtitle("Episode frequency by OPCS-4 Chapter (7 day rolling average)")+
+     xlab("Episode End Date")+
+     ylab("Number of Episodes")
+
+```
+Note that chapters B, D, F, J, N, P, V and Z have been excluded from the below figures to prevent disclosure of small numbers.
+
+```{r group11 produce rolling avg opcs-4 graphs free_y, fig.width = 7, fig.height = 8, echo = FALSE, warning = FALSE, fig.cap = "**Figure 29.** Episodes recorded by OPCS-4 Chapter, 7 day rolling average"}
+
+ggplot(data = opcs_rollavg_all_adjy, aes(x = EPI_END_DT, y = eps_7day_rollavg))+ 
+     geom_area(group = 1, fill = "#332288", alpha = 0.4)+
+     geom_line()+
+    facet_wrap(~OPCS_CODE, nrow = 5, scales = "free_y", labeller = labeller(OPCS_CODE = label_wrap_gen(40)))+
+     theme_minimal()+
+     theme(axis.text.x = element_text(angle = 90), strip.background = element_rect(fill = 'gray88'), strip.text = element_text(size = 7))+ #strip controls the header
+     scale_x_date(breaks = date_breaks("2 months"), labels = date_format('%b-%Y'), expand = c(0,0))+ #the expand argument stops the axis from extending past the dates in the dataframe (default value is 0.0.6)
+     ggtitle("Episode frequency by OPCS-4 Chapter adjusted y-axis(7 day rolling average)")+
+     xlab("Episode End Date")+
+     ylab("Number of Episodes")
+
+```
+
+Comparing the period from April to December 2020 with the equivalent period in 2019 shows that the variance in episode frequency differs by OPCS-4 Chapter.  Chapter `r oper_dif_max` (`r oper_dif_max_desc`) showed the greatest percentage difference in the number of episodes recorded and `r oper_dif_min` (`r oper_dif_min_desc`) showed the least variation.  `r oper_big_dif` codes more than halved the number of episodes recorded compared to the previous year.
+
+```{r group6 Avg episodes recorded by opcs-4 Chapter Apr-Dec 2019 and 2020 comparison, echo = FALSE}
+
+kbl(oper_init_mean_comp, caption = "**Table 6:** Average episodes Apr to Nov comparison 2019 to 2020", digits = 0) %>% kable_styling(bootstrap_options = "striped", full_width = F, position = "left", font_size = 12)
+
+```
+
+### OPCS-4 Codelag
+
+```{r group11a opcs coding confidence stacked area percentage, echo=FALSE, warning=FALSE, fig.width=6, fig.height=4,  fig.cap="**Figure 30.** Episodes by coding completion (7 day rolling average)"}
+
+ggplot(data = opcs_coding_confidence, mapping = aes(x = EPI_END_DT, y = `7day_rollavg`, fill = factor(coding_status))) +
+  geom_area(position = position_fill(reverse=TRUE), alpha = 0.6)+
+    scale_fill_manual(values = c("#332288","#44aa99"))+
+      geom_hline(yintercept = opcs_avg_coded_2020[1,1], colour = "#000000", linetype = 2, size = 1)+
+      geom_text(aes(x=as.Date('2021-01-20'), y=opcs_avg_coded_2020[1,1], label= "2020 avg % coded"), vjust=-1, colour= "#000000", size= 3)+
+  theme(axis.text.x = element_text(angle = 90), panel.border = element_rect(colour = "slategrey", fill = NA))+
+     ggtitle("Episodes by opcs coding completion (7 day rolling average)")+
+     xlab("Episode End Date")+
+     ylab("Percentage of Episodes")+
+    labs(fill = "Coding status")+
+  scale_x_date(breaks = date_breaks("1 months"), labels = date_format('%b-%Y'))+
+  scale_y_continuous(labels = percent, n.breaks = 10)+
+    guides(fill = guide_legend(override.aes = list(alpha = 0.6), reverse = TRUE)) #applies alpha to the legend
+
+```
+The below chart shows the number of episodes ending on a given day which had an OPCS-4 operation code recorded.  The area shading indicates the first data extract in which an OPCS-4 coding was recorded.
+
+```{r group11a plot rolling average oper codes by date added, fig.width=6, fig.height=5, echo=FALSE, warning=FALSE, fig.cap="**Figure 31.** OPCS-4 coded episodes by date primary operation code added to PEDW\n(7 day rolling average)"}
+
+ggplot(data = opcs_codelag, mapping = aes(x = EPI_END_DT, y = `7day_rollavg`, fill = factor(FIRST_OPCS_DT))) + 
+  geom_area(position = position_stack(reverse = TRUE), alpha = 0.6)+
+    scale_fill_manual(values = c("#882255","#ddcc77","#44aa99","#332288", "#88CCEE", "#CC6677"))+
+   geom_vline(aes(xintercept = as.Date(Extract_date1), linetype = Extract_date1), colour = "#882255", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date2), linetype = Extract_date2), colour = "#ddcc77", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date3), linetype = Extract_date3),colour = "#44aa99", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date4), linetype = Extract_date4), colour = "#332288", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date5), linetype = Extract_date5), colour = "#88CCEE", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date6), linetype = Extract_date6), colour = "#CC6677", size = 1)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90), panel.border = element_rect(colour = "slategrey", fill = NA), legend.position = "bottom", legend.text = element_text(size=8), legend.title = element_text(size=8), plot.title = element_text(size = 11))+
+     ggtitle("OPCS-4 coded episodes by date primary operation code added to PEDW\n(7 day rolling average)")+
+     xlab("Episode End Date")+
+     ylab("Number of Episodes")+
+    scale_x_date(date_labels = "%d %b %y", breaks = breaks_pretty(n = 20))+
+    labs(fill = "Data extraction\ndate operation\ncode recorded")+
+  scale_linetype_manual(name = 'Data\nextraction\ndate', values = c("dashed", "dashed", "dashed", "dashed", "dashed", "dashed"), guide = guide_legend(override.aes = list(colour = c("#882255", "#ddcc77", "#44aa99", "#332288", "#88CCEE", "#CC6677")),nrow=3, byrow=TRUE))+
+    guides(fill = guide_legend(override.aes = list(alpha = 0.6),nrow=3, byrow=TRUE)) #applies alpha to the legend
+
+```
+The below chart shows the percentage of all episodes ending on a given day which had an OPCS-4 operation code recorded.  The area shading indicates the first data extract in which an OPCS-4 coding was recorded.
+
+```{r group11a plot rolling average percentage oper coded by date added, fig.height = 5, fig.width=7, echo=FALSE, warning=FALSE, fig.cap="**Figure 32.** Percentage of OPCS-4 coded episodes by date added to PEDW \n (7 day rolling average)"}
+
+ggplot(data = opcs_codelag_all, mapping = aes(x = EPI_END_DT, y = Percent_Coded, fill = factor(FIRST_OPCS_DT))) +
+  geom_area(position = position_stack(reverse = TRUE), alpha = 0.6)+
+    scale_fill_manual(values = c("#882255","#ddcc77","#44aa99","#332288", "#88CCEE", "#CC6677"))+
+    geom_vline(aes(xintercept = as.Date(Extract_date1), linetype = Extract_date1), colour = "#882255", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date2), linetype = Extract_date2), colour = "#ddcc77", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date3), linetype = Extract_date3),colour = "#44aa99", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date4), linetype = Extract_date4), colour = "#332288", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date5), linetype = Extract_date5), colour = "#88CCEE", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date6), linetype = Extract_date6), colour = "#CC6677", size = 1)+
+      geom_hline(yintercept = opcs_avg_coded_2020[1,1], colour = "#000000", linetype = 2, size = 1)+
+      geom_text(aes(x=as.Date('2021-02-20'), y=opcs_avg_coded_2020[1,1], label= "2020 avg % coded"), vjust=1.2, colour= "#000000", size= 3)+
+    theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90), panel.border = element_rect(colour = "slategrey", fill = NA), legend.position = "bottom", legend.text = element_text(size=8), legend.title = element_text(size=8), plot.title = element_text(size=11))+
+     ggtitle("Percentage of OPCS-4 coded episodes by date added to primary operation code\nadded to PEDW (7 day rolling average)")+
+     xlab("Episode End Date")+
+     ylab("Percentage of Episodes")+
+    scale_y_continuous(labels = scales::percent, breaks = breaks_pretty(), limits = c(0,1))+
+    scale_x_date(date_labels = "%d %b %y", breaks = date_breaks("1 month"))+
+      labs(fill = "Date OPCS4\ncode first\nrecorded")+
+    guides(fill = guide_legend(override.aes = list(alpha = 0.6),nrow=3, byrow=TRUE))+ #applies alpha to the legend
+  scale_linetype_manual(name = 'Data\nextraction\ndate', values = c("dashed", "dashed", "dashed", "dashed", "dashed", "dashed"), guide = guide_legend(override.aes = list(colour = c("#882255", "#ddcc77", "#44aa99", "#332288", "#88CCEE", "#CC6677")),nrow=3, byrow=TRUE))
+
+```
+The below charts show the number of OPCS-4 coded episodes ending on a given day, displayed by OPCS-4 Chapter.  The area shading indicates the first data extract in which an OPCS-4 code was recorded.
+
+```{r group11b coding lag by OPCS-4 chapters, fig.width=7, fig.height=12, echo= FALSE, warning=FALSE, fig.cap="**Figure 33.** Coding lag by OPCS-4 Chapter (7 day rolling avg)"}
+
+ggplot(data = codelag_opcs_all, mapping = aes(x = EPI_END_DT, y = `7day_rollavg`, fill = factor(FIRST_OPCS_DT))) + 
+  geom_area(position = position_stack(reverse = TRUE), alpha = 0.6)+
+    scale_fill_manual(values = c("#882255","#ddcc77","#44aa99","#332288", "#88CCEE", "#CC6677"))+
+   geom_vline(aes(xintercept = as.Date(Extract_date1), linetype = Extract_date1), colour = "#882255", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date2), linetype = Extract_date2), colour = "#ddcc77", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date3), linetype = Extract_date3),colour = "#44aa99", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date4), linetype = Extract_date4), colour = "#332288", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date5), linetype = Extract_date5), colour = "#88CCEE", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date6), linetype = Extract_date6), colour = "#CC6677", size = 1)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90), panel.border = element_rect(colour = "slategrey", fill = NA), legend.position = "bottom", legend.text = element_text(size=8), legend.title = element_text(size=8), plot.title = element_text(size=11))+
+      facet_wrap(~OPCS_CODE, nrow = 8, labeller = labeller(OPCS_CODE = label_wrap_gen(35)))+
+     ggtitle("Coding lag by OPCS-4 chapter\n(7 day rolling avg)")+
+     xlab("Episode End Date")+
+     ylab("Number of Episodes")+
+    labs(fill = "Date OPCS\ncode first\nrecorded")+
+    scale_x_date(breaks = breaks_pretty(n = 10), labels = date_format('%b-%Y'))+
+    scale_linetype_manual(name = 'Data\nextraction\ndate', values = c("dashed", "dashed", "dashed", "dashed", "dashed", "dashed"), guide = guide_legend(override.aes = list(colour = c("#882255", "#ddcc77", "#44aa99", "#332288", "#88CCEE", "#CC6677")),nrow=3, byrow=TRUE))+
+    guides(fill = guide_legend(override.aes = list(alpha = 0.6),nrow=3, byrow=TRUE)) #applies alpha to the legend
+
+```
+
+Note that chapters B, D, F, J, N, and P have been excluded from the below figures to prevent disclosure of small numbers.
+
+```{r group11b coding lag by OPCS-4 chapters free_y, fig.width=7, fig.height=9, echo= FALSE, warning=FALSE, fig.cap="**Figure 34.** Coding lag by OPCS-4 Chapter, adjusted y-axis (7 day rolling avg)"}
+
+ggplot(data = codelag_opcs_all_adjy, mapping = aes(x = EPI_END_DT, y = `7day_rollavg`, fill = factor(FIRST_OPCS_DT))) + 
+  geom_area(position = position_stack(reverse = TRUE), alpha = 0.6)+
+    scale_fill_manual(values = c("#882255","#ddcc77","#44aa99","#332288", "#88CCEE", "#CC6677"))+
+   geom_vline(aes(xintercept = as.Date(Extract_date1), linetype = Extract_date1), colour = "#882255", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date2), linetype = Extract_date2), colour = "#ddcc77", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date3), linetype = Extract_date3),colour = "#44aa99", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date4), linetype = Extract_date4), colour = "#332288", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date5), linetype = Extract_date5), colour = "#88CCEE", size = 1)+
+    geom_vline(aes(xintercept = as.Date(Extract_date6), linetype = Extract_date6), colour = "#CC6677", size = 1)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90), panel.border = element_rect(colour = "slategrey", fill = NA), legend.position = "bottom", legend.text = element_text(size=8), legend.title = element_text(size=8), plot.title = element_text(size=11))+
+      facet_wrap(~OPCS_CODE, nrow = 5, labeller = labeller(OPCS_CODE = label_wrap_gen(35)), scales="free_y")+
+     ggtitle("Coding lag by OPCS-4 chapter, adjusted y axis\n(7 day rolling avg)")+
+     xlab("Episode End Date")+
+     ylab("Number of Episodes")+
+    scale_x_date(breaks = breaks_pretty(n = 10), labels = date_format('%b-%Y'))+
+    labs(fill = "Date OPCS\ncod nfirst\nrecorded")+
+    scale_linetype_manual(name = 'Data\nextraction\ndate', values = c("dashed", "dashed", "dashed", "dashed", "dashed", "dashed"), guide = guide_legend(override.aes = list(colour = c("#882255", "#ddcc77", "#44aa99", "#332288", "#88CCEE", "#CC6677")),nrow=3, byrow=TRUE))+
+    guides(fill = guide_legend(override.aes = list(alpha = 0.6),nrow=3, byrow=TRUE)) #applies alpha to the legend
+
+```
+
+### Analysis by Service Provision
+
+It is recognised that COVID-19 will have resulted in changes to the usual services hospitals provide.  The below chart shows the differences in elective, emergency and other admissions.
+
+Elective episodes saw a more than 50% reduction between April and December 2020, compared to 2019.
+
+```{r group15 produce rolling avg admission graphs, fig.width = 6, fig.height = 4, echo = FALSE, warning = FALSE, fig.cap = "**Figure 37.** Frequency of episodes by admission type, 7 day rolling average"}
+
+ggplot(data = admis_rolling, aes(x = EPI_END_DT, y = eps_7day_rollavg, ))+
+    geom_line(size = 1.2, aes(colour = str_wrap(ADMIS_GROUP, 20)))+ #str_wrap wraps the long text in the legend according to the 20 setting
+    scale_color_manual(values = Colour_table$Colour)+
+    theme_minimal()+
+    theme(axis.text.x = element_text(angle = 90), strip.background = element_rect(fill = 'gray88'), legend.key.height = unit(1,"cm"), legend.position = "bottom")+ #strip controls the header
+    scale_x_date(breaks = date_breaks("2 months"), labels = date_format('%b-%Y'), expand = c(0,0))+ #the expand argument stops the axis from extending past the dates in the dataframe (default value is 0.0.6)
+    xlab("Episode End Date")+
+    ylab("Number of Episodes")+
+       ggtitle("Frequency of episodes by admission type (7 day rolling average")+
+    labs(colour = "Admission Type") #renames the legend title
+
+```
+
+```{r group15 Avg episodes recorded Apr-Nov 2019 and 2020 by admission type, echo = FALSE}
+
+kbl(admis_mean_comp, caption = "**Table 7:** Average episodes per month by admission type, Apr19 to Mar20 comparison with Apr20 to Mar21", digits = 0) %>% kable_styling(bootstrap_options = "striped", full_width = F, position = "left", font_size = 12)
+
+```
+
+## References
+
+Audit Wales (2020). Cracking the Code, Management of Clinical Coding Across Wales (Sep 2020).  Available at: https://www.audit.wales/sites/default/files/clinical_coding_eng_10.pdf.  Accessed: 11/05/21.
+
+BMA (2020), The Hidden Impact of Covid.  Available at: bma.org.uk/media/2841/the-hidden-impact-of-covid_web-pdf.pdf.  Accessed 11/05/21.
+
+HSCIC (last updated April 2021), Covid-19 National Clinical Standard and Guidance. Available at: hscic.kahootz.com/connect.ti/t_c_home/view?objectID=19165328. Accessed: 11/05/21.
+
+World Health Organisation (2021). Coronavirus symptoms.  Available at: who.int/health-topics/coronavisurs#tab=tab_3.  Accessed 11/05/21.
+
+
+## Appendices
+
+```{r group6 ICD Chapter Table, echo = FALSE}
+
+kbl(chap_tab, caption = "Appendix 1: Table 8. ICD-10 Chapter Codes and Descriptions") %>% kable_styling(bootstrap_options = "striped", full_width = F, position = "left", font_size = 12)
+
+```
+
+```{r group7 category 1 icd table, echo = FALSE}
+
+kbl(cat1_freq_comp, caption = "Appendix 2: Table 9. Episodes recorded by ICD-10 category 1 description, Apr19 to Mar20 comparison with Apr20 to Mar21", digits = 0) %>% kable_styling(bootstrap_options = "striped", full_width = F, position = "left", font_size = 12)
+
+```
+
+```{r group11 OPCS-4 chapter with desciption, echo = FALSE}
+
+kbl(opcs_chap_tab, caption = "Appendix 3: Table 10. OPCS-4 Chapter Codes and Descriptions") %>% kable_styling(bootstrap_options = "striped", full_width = F, position = "left", font_size = 12)
+
+```
+
+Note that any figures in the below chart which are less than five are shown as zero.
+
+```{r group0 unfinished episodes graph, echo= FALSE, fig.height=4, fig.width=6, fig.cap = "**Appendix 4:** figure 38. Unfinished PEDW episodes with episode start dates from April 2020"}
+
+UNFIN_EPS_RED$NUM_OF_EPS[UNFIN_EPS_RED$NUM_OF_EPS < 5] <- 0
+
+ggplot(data= UNFIN_EPS_RED,aes(x=EPI_STR_YR_MT,y=NUM_OF_EPS))+
+  geom_col(fill = "#332288", alpha = 0.7)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90), panel.border = element_rect(colour = "slategrey", fill = NA))+
+  xlab("Episode Start Month")+
+  ylab("Number of Episodes")+
+  ggtitle("Appendix 4: Unfinished Episodes from April 2020")+
+  scale_x_continuous(breaks = as.numeric(UNFIN_EPS_RED$EPI_STR_YR_MT), labels = format(UNFIN_EPS_RED$EPI_STR_YR_MT, "%b %Y"), expand = c(0,0))+
+  geom_text(aes(label = NUM_OF_EPS), size = 3, vjust = -0.3) #label function adds data labels with vjust used to adjust the height
+
+```
+
+```{r group8 produce rolling avg top icd graphs, fig.width = 8, fig.height = 8, echo = FALSE, warning = FALSE, fig.cap= "**Appendix 5:** figure 39. Top 10 recorded ICD-10 category 1 codes (to three characters), 7 day rolling average"}
+
+ggplot(data = icd_rollavg_top, aes(x = EPI_END_DT, y = eps_7day_rollavg))+  
+    geom_area(group = 1, fill = "#332288", alpha = 0.4)+
+     geom_line()+
+ facet_wrap(~ICD_CODE, nrow = 4, labeller = labeller(`ICD_CODE` = label_wrap_gen(45)))+
+     theme_minimal()+
+     theme(axis.text.x = element_text(angle = 90), strip.background = element_rect(fill = 'gray88'),  strip.text = element_text(size = 7))+ #strip controls the header+
+     scale_x_date(breaks = date_breaks("2 months"), labels = date_format('%b-%Y'), expand = c(0,0))+ #the expand argument stops the axis from extending past the dates in the dataframe (default value is 0.0.6)
+     ggtitle("Appendix 5: Top 10 ICD-10 diagnosis codes to three characters (7 day rolling average)")+
+     xlab("Episode End Date")+
+     ylab("Number of Episodes")
+
+```
+
+```{r group8 Top 10 icd10 table, echo = FALSE, include = FALSE}
+
+kbl(Top_10_icd[,1:2], caption = "Appendix 6: Table 11. Top 10 ICD-10 3 character operation codes") %>% kable_styling(bootstrap_options = "striped", full_width = F, position = "left", font_size = 12)
+
+```
+
+```{r group12 produce rolling avg top opcs graphs, fig.width = 8, fig.height = 8, echo = FALSE, warning = FALSE, fig.cap= "**Appendix 7:** figure 40. Top 10 recorded OPCS-4 codes (to three characters), 7 day rolling average"}
+
+ggplot(data = opcs_rollavg_top, aes(x = EPI_END_DT, y = eps_7day_rollavg))+  #transform used to sort the graphs in numerical order
+     geom_area(group = 1, fill = "#332288", alpha = 0.4)+
+     geom_line()+
+ facet_wrap(~Description, nrow = 4, labeller = labeller(`Description` = label_wrap_gen(45)))+
+     theme_minimal()+
+     theme(axis.text.x = element_text(angle = 90), strip.background = element_rect(fill = 'gray88'), strip.text = element_text(size = 7))+ #strip controls the header
+     scale_x_date(breaks = date_breaks("2 months"), labels = date_format('%b-%Y'), expand = c(0,0))+ #the expand argument stops the axis from extending past the dates in the dataframe (default value is 0.0.6)
+    ggtitle("Appendix 7: Top 10 OPCS-4 operation codes to three characters (7 day rolling average)")+
+     xlab("Episode End Date")+
+     ylab("Number of Episodes")
+
+```
+
+```{r group12 Top 10 opcs4 table, echo = FALSE}
+
+kbl(Top_10_opcs, caption = "Appendix 8: Table 12. Top 10 OPCS-4 3 character operation codes") %>% kable_styling(bootstrap_options = "striped", full_width = F, position = "left", font_size = 12)
+
+```
+
+```{r group17 ALF STATUS table, echo = FALSE}
+
+kbl(ALF_STATUS, caption = "Appendix 9: Table 13. ALF status code descriptions") %>% kable_styling(bootstrap_options = "striped", full_width = F, position = "left", font_size = 12)
+
+```
