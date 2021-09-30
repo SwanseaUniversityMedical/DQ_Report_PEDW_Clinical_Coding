@@ -1,7 +1,5 @@
 # Repository filing system:
 
-TESTING WHETHER PULL WORKS
-
 - Latest version of the Data Quality Report PEDW Clinical Coding report can be found in the main folder of the repo
 - Scripts folder contains SQL and RMarkdown scripts and guidance for running the report
 
