@@ -141,33 +141,3 @@ CREATE TABLE SAILW0572V.VB_SENSITIVE_OPCS_CODES (
 	concept_id VARCHAR(10),
 	concept_version_id VARCHAR(10),
 	concept_name VARCHAR (100));
-		
-/* CREATE TABLE TO link LOCAL health board TO unitary authoritary */
-
-CREATE TABLE SAILW0572V.VB_LHB_LOOKUP (
-	LSOA_DESC VARCHAR (50),
-	LHB VARCHAR (50));
-	
-INSERT INTO SAILW0572V.VB_LHB_LOOKUP VALUES 
-	('Blaenau Gwent','Aneurin Bevan'),
-	('Bridgend','Abertawe Bro Morgannwg'),
-	('Caerphilly','Aneurin Bevan'),
-	('Cardiff','Cardiff & Vale'),
-	('Carmarthenshire','Hwyel Dda'),
-	('Ceredigion','Hwyel Dda'),
-	('Conwy','Betsi Cadwaladr'),
-	('Denbighshire','Betsi Cadwaladr'),
-	('Flintshire','Betsi Cadwaladr'),
-	('Gwynedd','Betsi Cadwaladr'),
-	('Isle of Anglesey','Betsi Cadwaladr'),
-	('Merthyr Tydfil','Cwm Taf'),
-	('Monmouthshire','Aneurin Bevan'),
-	('Neath Port Talbot','Abertawe Bro Morgannwg'),
-	('Newport','Aneurin Bevan'),
-	('Pembrokeshire','Hwyel Dda'),
-	('Powys','Powys'),
-	('Rhondda Cynon Taf','Cwm Taf'),
-	('Swansea','Abertawe Bro Morgannwg'),
-	('Torfaen','Aneurin Bevan'),
-	('Vale of Glamorgan','Cardiff & Vale'),
-	('Wrexham','Betsi Cadwaladr');
