@@ -1,7 +1,7 @@
 # Repository filing system:
 
-- Latest version of the Data Quality Report PEDW Clinical Coding report can be found in the main folder.
-- Scripts folder contains SQL and RMarkdown scripts and guidance for running the report.
+- Data Insight and latest version of the Data Quality Report PEDW Clinical Coding report can be found in the main folder.
+- SQL and RMarkdown scripts and guidance for running the report can be found in the scripts folder.  Note that the scripts can only be run inside the SAIL databank.
 
 # Data Quality Report PEDW Clinical Coding
 
